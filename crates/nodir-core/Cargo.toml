@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ignore = "0.4"
+thiserror = "2"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"
