@@ -14,6 +14,13 @@ path = "src/main.rs"
 [dependencies]
 nodir-core.workspace = true
 clap = { version = "4.5", features = ["derive"] }
+anyhow = "1"
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
