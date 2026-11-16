@@ -43,17 +43,81 @@ pub struct ChildLink {
     pub target: String,
 }
 
-/// Locates the children section: the last start marker before the last end
-/// marker. Returns the byte range from the start of the start marker to the
-/// end of the end marker.
+/// Locates the children section and returns the byte range from the start
+/// of the start marker to the end of the end marker.
 ///
-/// Taking the *last* pair means a stray marker the user typed earlier in the
-/// file (or a start marker left without an end) stays user content, and the
-/// block NoDir appended at the end is the one that gets regenerated.
+/// A marker only counts when it is alone on its line (up to three spaces of
+/// indentation and trailing whitespace allowed) and outside a fenced code
+/// block. The section is the last complete pair: a start-marker line followed
+/// by the first end-marker line after it. So a marker the user mentions inline,
+/// quotes in a code fence, or leaves unterminated stays user content, and
+/// text after the section is never swallowed.
 pub fn find(content: &str) -> Option<Range<usize>> {
-    let end = content.rfind(END_MARKER)?;
-    let start = content[..end].rfind(START_MARKER)?;
-    Some(start..end + END_MARKER.len())
+    scan(content).section
+}
+
+struct Scan {
+    section: Option<Range<usize>>,
+    /// The fence still open at the end of the content: its character and
+    /// length.
+    open_fence: Option<(char, usize)>,
+}
+
+fn scan(content: &str) -> Scan {
+    let mut section = None;
+    let mut start: Option<usize> = None;
+    let mut fence: Option<(char, usize)> = None;
+    let mut offset = 0;
+    for raw in content.split_inclusive('\n') {
+        let line_start = offset;
+        offset += raw.len();
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_start();
+        if let Some((ch, len)) = fence {
+            if fence_run(trimmed, ch) >= len && trimmed.trim_start_matches(ch).trim().is_empty() {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(open) = fence_open(trimmed) {
+            fence = Some(open);
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        if indent > 3 || !line[..indent].bytes().all(|b| b == b' ') {
+            continue;
+        }
+        let at = line_start + indent;
+        match trimmed.trim_end() {
+            START_MARKER => start = Some(at),
+            END_MARKER => {
+                if let Some(s) = start.take() {
+                    section = Some(s..at + END_MARKER.len());
+                }
+            }
+            _ => {}
+        }
+    }
+    Scan {
+        section,
+        open_fence: fence,
+    }
+}
+
+/// Number of leading `ch` characters in `line`.
+fn fence_run(line: &str, ch: char) -> usize {
+    line.chars().take_while(|&c| c == ch).count()
+}
+
+/// The fence a line opens (` ``` ` or `~~~`, three or more), if any. A
+/// backtick fence's info string may not contain a backtick.
+fn fence_open(line: &str) -> Option<(char, usize)> {
+    let ch = line.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = fence_run(line, ch);
+    if len < 3 || (ch == '`' && line[len..].contains('`')) {
+        return None;
+    }
+    Some((ch, len))
 }
 
 /// Splits content around its children section.
@@ -114,16 +178,28 @@ pub fn render(children: &[Child], content_file: &str, newline: &str) -> String {
 pub fn apply(content: &str, children: &[Child], content_file: &str) -> String {
     let newline = line_ending(content);
     let block = render(children, content_file, newline);
-    if let Some(range) = find(content) {
+    let scan = scan(content);
+    if let Some(range) = scan.section {
         return [&content[..range.start], &block, &content[range.end..]].concat();
     }
-    let separator = if content.is_empty() || content.ends_with(&format!("{newline}{newline}")) {
-        String::new()
+    let mut separator = String::new();
+    if let Some((ch, len)) = scan.open_fence {
+        // An unclosed code fence runs to the end of the file, so a section
+        // appended after it would be code (and never found again). Close it
+        // first; the closing line is part of the separator, not user content.
+        if !content.ends_with('\n') {
+            separator.push_str(newline);
+        }
+        separator.extend(std::iter::repeat_n(ch, len));
+        separator.push_str(newline);
+        separator.push_str(newline);
+    } else if content.is_empty() || content.ends_with(&format!("{newline}{newline}")) {
     } else if content.ends_with('\n') {
-        newline.to_string()
+        separator.push_str(newline);
     } else {
-        format!("{newline}{newline}")
-    };
+        separator.push_str(newline);
+        separator.push_str(newline);
+    }
     [content, &separator, &block, newline].concat()
 }
 
@@ -328,6 +404,69 @@ mod tests {
         let out = apply(&unterminated, &sample(), FILE);
         assert!(out.starts_with(&unterminated));
         assert_round_trip(&unterminated);
+    }
+
+    #[test]
+    fn end_marker_mentioned_after_the_section_is_user_text() {
+        // Regression: a later mention of the end marker used to be taken as
+        // the end of the section, deleting the user's text in between.
+        let section = format!("{START_MARKER}\n- [old](old)\n{END_MARKER}");
+        let inline = format!(
+            "# Doc\n\n{section}\n\nIMPORTANT user notes here.\nThe block ends at `{END_MARKER}`.\n"
+        );
+        let fenced = format!(
+            "# Doc\n\n{section}\n\nIMPORTANT notes.\n\n```markdown\n{START_MARKER}\n- [x](x)\n{END_MARKER}\n```\n\nMore notes.\n"
+        );
+        let tilde_fenced =
+            format!("# Doc\n\n{section}\n\n~~~~\n{END_MARKER}\n```\n{START_MARKER}\n~~~~\nTail.\n");
+        let on_own_line = format!("# Doc\n\n{section}\n\nNotes.\n{END_MARKER}\nMore.\n");
+        for content in [inline, fenced, tilde_fenced, on_own_line] {
+            let out = apply(&content, &sample(), FILE);
+            let tail = &content[content.find(END_MARKER).unwrap() + END_MARKER.len()..];
+            assert!(out.starts_with("# Doc\n\n"), "{out}");
+            assert!(out.ends_with(tail), "user text lost:\n{content}\n=>\n{out}");
+            assert!(!out.contains("[old]"), "{out}");
+            assert!(out.contains("- [docs/](docs/PIFF.md)"), "{out}");
+            assert_round_trip(&content);
+        }
+    }
+
+    #[test]
+    fn markers_must_be_alone_on_their_line() {
+        // Inline and indented-code mentions are not markers: a section is
+        // appended instead.
+        for content in [
+            format!("See {START_MARKER} and {END_MARKER} inline.\n"),
+            format!("    {START_MARKER}\n    {END_MARKER}\n"),
+            format!("\t{START_MARKER}\n\t{END_MARKER}\n"),
+        ] {
+            assert_eq!(find(&content), None, "{content}");
+            let out = apply(&content, &[], FILE);
+            assert!(out.starts_with(&content));
+            assert_round_trip(&content);
+        }
+        // Up to three spaces and trailing whitespace are fine.
+        let content = format!("Intro\n   {START_MARKER}  \n- [a](a)\n {END_MARKER}\t\nAfter\n");
+        let out = apply(&content, &[], FILE);
+        assert_eq!(
+            out,
+            format!("Intro\n   {START_MARKER}\n{END_MARKER}\t\nAfter\n")
+        );
+    }
+
+    #[test]
+    fn unclosed_fence_is_closed_before_appending() {
+        for content in ["```rust\nfn main() {}\n", "~~~~\ncode", ""] {
+            let out = apply(content, &sample(), FILE);
+            assert!(out.starts_with(content));
+            assert!(find(&out).is_some(), "{out}");
+            assert_round_trip(content);
+        }
+        let out = apply("```rust\nfn x() {}", &[], FILE);
+        assert_eq!(
+            out,
+            format!("```rust\nfn x() {{}}\n```\n\n{START_MARKER}\n{END_MARKER}\n")
+        );
     }
 
     #[test]
