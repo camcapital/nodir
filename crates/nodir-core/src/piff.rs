@@ -1,7 +1,7 @@
 //! The Piff: a directory plus its markdown content.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::children::{self, Child};
@@ -34,12 +34,13 @@ pub enum SyncOutcome {
 }
 
 /// The result of syncing one Piff during a recursive sync.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct SyncReport {
-    /// The Piff's content file path.
+    /// The Piff's content file path, or its directory when listing its
+    /// children failed.
     pub path: PathBuf,
-    /// What happened to it.
-    pub outcome: SyncOutcome,
+    /// What happened to it, or why it failed.
+    pub result: Result<SyncOutcome>,
 }
 
 /// A directory viewed as a Parent File.
@@ -158,26 +159,41 @@ impl Piff {
     /// children. Descends only into child Piffs that are listed as children
     /// (so hidden and git-ignored directories are skipped) and never follows
     /// symlinks.
-    pub fn sync_recursive(&self, mode: SyncMode) -> Result<Vec<SyncReport>> {
+    pub fn sync_recursive(&self, mode: SyncMode) -> Vec<SyncReport> {
         let mut reports = Vec::new();
-        self.sync_into(mode, &mut reports)?;
-        Ok(reports)
+        self.sync_into(mode, &mut reports);
+        reports
     }
 
-    fn sync_into(&self, mode: SyncMode, reports: &mut Vec<SyncReport>) -> Result<()> {
-        let outcome = self.sync(mode)?;
+    /// Errors are recorded and the walk carries on, so one bad Piff (say, a
+    /// non-UTF-8 `PIFF.md`) doesn't leave the rest of the tree half-synced.
+    fn sync_into(&self, mode: SyncMode, reports: &mut Vec<SyncReport>) {
         reports.push(SyncReport {
             path: self.content_path(),
-            outcome,
+            result: self.sync(mode),
         });
-        for child in self.children()? {
+        let children = match self.children() {
+            Ok(children) => children,
+            Err(err) => {
+                reports.push(SyncReport {
+                    path: self.dir.clone(),
+                    result: Err(err),
+                });
+                return;
+            }
+        };
+        for child in children {
             if !child.is_piff() || child.path.is_symlink() {
                 continue;
             }
-            let piff = Piff::with_provider(&child.path, self.provider)?;
-            piff.sync_into(mode, reports)?;
+            match Piff::with_provider(&child.path, self.provider) {
+                Ok(piff) => piff.sync_into(mode, reports),
+                Err(err) => reports.push(SyncReport {
+                    path: child.path,
+                    result: Err(err),
+                }),
+            }
         }
-        Ok(())
     }
 
     /// Replaces the content with `text`, then regenerates the children
@@ -209,6 +225,32 @@ impl Piff {
 
     fn write_raw(&self, text: &str) -> Result<()> {
         let path = self.content_path();
-        fs::write(&path, text).map_err(|err| Error::io(path, err))
+        // A symlinked content file is written through to its target rather
+        // than replaced by a regular file.
+        let target = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        atomic_write(&target, text.as_bytes()).map_err(|err| Error::io(path, err))
     }
+}
+
+/// Writes `bytes` to a hidden temporary file next to `path`, then renames it
+/// over `path`, so a crash mid-write never leaves the user's file truncated.
+/// The existing file's permissions are kept.
+fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dir.join(format!(".{name}.nodir-{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        if let Ok(meta) = fs::metadata(path) {
+            fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }

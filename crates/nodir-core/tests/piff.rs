@@ -114,9 +114,8 @@ fn reading_never_creates_the_content_file() {
     );
     assert!(piff
         .sync_recursive(SyncMode::ExistingOnly)
-        .unwrap()
         .iter()
-        .all(|r| r.outcome == SyncOutcome::Skipped));
+        .all(|r| matches!(r.result, Ok(SyncOutcome::Skipped))));
 
     assert!(!piff.content_path().exists());
     assert!(!tmp.path().join("child/PIFF.md").exists());
@@ -192,10 +191,11 @@ fn recursive_sync_skips_ignored_and_hidden_directories() {
 
     let reports = Piff::open(root)
         .unwrap()
-        .sync_recursive(SyncMode::CreateIfMissing)
-        .unwrap();
+        .sync_recursive(SyncMode::CreateIfMissing);
     assert_eq!(reports.len(), 4); // root, a, a/b, a/b/c
-    assert!(reports.iter().all(|r| r.outcome == SyncOutcome::Created));
+    assert!(reports
+        .iter()
+        .all(|r| matches!(r.result, Ok(SyncOutcome::Created))));
     assert!(root.join("a/b/c/PIFF.md").is_file());
     assert!(!root.join("node_modules/PIFF.md").exists());
     assert!(!root.join(".cache/PIFF.md").exists());
@@ -203,9 +203,10 @@ fn recursive_sync_skips_ignored_and_hidden_directories() {
     // Second pass: nothing to do.
     let reports = Piff::open(root)
         .unwrap()
-        .sync_recursive(SyncMode::CreateIfMissing)
-        .unwrap();
-    assert!(reports.iter().all(|r| r.outcome == SyncOutcome::Unchanged));
+        .sync_recursive(SyncMode::CreateIfMissing);
+    assert!(reports
+        .iter()
+        .all(|r| matches!(r.result, Ok(SyncOutcome::Unchanged))));
 }
 
 #[test]
@@ -237,4 +238,135 @@ fn non_directories_and_bad_utf8_are_errors() {
         Err(Error::NotUtf8(_))
     ));
     assert_eq!(fs::read(piff.content_path()).unwrap(), b"\xff\xfe bad");
+}
+
+#[test]
+fn parent_gitignore_applies_only_inside_a_repo() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    // No repository: a .gitignore above the opened directory (think
+    // ~/.gitignore) must not hide anything.
+    fs::write(root.join(".gitignore"), "secret*\n").unwrap();
+    touch(&root.join("h/secrets.txt"));
+    touch(&root.join("h/secret-dir/x"));
+    touch(&root.join("h/plain.txt"));
+    let names = |dir: &Path| -> Vec<String> {
+        Piff::open(dir)
+            .unwrap()
+            .children()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
+    };
+    assert_eq!(
+        names(&root.join("h")),
+        ["secret-dir", "plain.txt", "secrets.txt"]
+    );
+    // The opened directory's own .gitignore still applies.
+    assert_eq!(names(root), ["h"]);
+    fs::write(root.join("h/.gitignore"), "*.txt\n!plain.txt\n").unwrap();
+    assert_eq!(names(&root.join("h")), ["secret-dir", "plain.txt"]);
+
+    // Inside a repository, .gitignore files up to the repo root apply, and
+    // nothing above it.
+    fs::create_dir_all(root.join("h/.git")).unwrap();
+    touch(&root.join("h/sub/secrets.md"));
+    touch(&root.join("h/sub/notes.txt"));
+    touch(&root.join("h/sub/plain.txt"));
+    assert_eq!(names(&root.join("h/sub")), ["plain.txt", "secrets.md"]);
+}
+
+#[test]
+fn an_ignored_directory_opened_directly_lists_its_contents() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join(".git")).unwrap();
+    fs::write(root.join(".gitignore"), "build/\n").unwrap();
+    touch(&root.join("build/out.bin"));
+    let build = Piff::open(root.join("build")).unwrap();
+    let names: Vec<_> = build
+        .children()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(names, ["out.bin"]);
+}
+
+#[test]
+fn recursive_sync_continues_past_errors() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    touch(&root.join("a/x.txt"));
+    touch(&root.join("b/y.txt"));
+    touch(&root.join("c/z.txt"));
+    fs::write(root.join("b/PIFF.md"), b"\xff bad").unwrap();
+
+    let reports = Piff::open(root)
+        .unwrap()
+        .sync_recursive(SyncMode::CreateIfMissing);
+    assert_eq!(reports.len(), 4);
+    let failed: Vec<_> = reports.iter().filter(|r| r.result.is_err()).collect();
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0].path.ends_with("b/PIFF.md"));
+    assert!(matches!(failed[0].result, Err(Error::NotUtf8(_))));
+    // The Piffs after the bad one were still synced, and it was left alone.
+    assert!(root.join("c/PIFF.md").is_file());
+    assert_eq!(fs::read(root.join("b/PIFF.md")).unwrap(), b"\xff bad");
+}
+
+#[test]
+fn writes_leave_no_temp_files_and_keep_permissions() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("PIFF.md"), "# Hi\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.join("PIFF.md"), fs::Permissions::from_mode(0o640)).unwrap();
+    }
+    touch(&root.join("a.txt"));
+    let piff = Piff::open(root).unwrap();
+    assert!(matches!(
+        piff.sync(SyncMode::ExistingOnly),
+        Ok(SyncOutcome::Updated)
+    ));
+    let mut entries: Vec<_> = fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["PIFF.md", "a.txt"]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(root.join("PIFF.md"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o640);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_content_file_is_written_through() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join("p")).unwrap();
+    fs::write(root.join("real.md"), "# Real\n").unwrap();
+    std::os::unix::fs::symlink(root.join("real.md"), root.join("p/PIFF.md")).unwrap();
+    touch(&root.join("p/a.txt"));
+    Piff::open(root.join("p"))
+        .unwrap()
+        .sync(SyncMode::ExistingOnly)
+        .unwrap();
+    assert!(fs::symlink_metadata(root.join("p/PIFF.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::read_to_string(root.join("real.md"))
+        .unwrap()
+        .contains("- [a.txt](a.txt)"));
 }

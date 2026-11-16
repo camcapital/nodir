@@ -3,6 +3,7 @@ name = "nodir-cli"
 description = "The nodir command-line tool and TUI"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

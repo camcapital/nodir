@@ -4,7 +4,8 @@ use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ignore::WalkBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::Match;
 
 use crate::{Error, Result};
 
@@ -38,52 +39,45 @@ impl Child {
 /// Lists the immediate children of `dir`, Piffs first, then files, each
 /// group sorted by name (case-insensitive).
 ///
-/// Excluded: hidden entries (including `.git`), anything matched by a
-/// `.gitignore` in `dir` or its parents, and the content file itself
-/// (`content_file`, e.g. `PIFF.md`). Global and repository-local excludes
-/// (`core.excludesFile`, `.git/info/exclude`) are not applied, so the list,
-/// and the children section written from it, is the same on every machine.
+/// Excluded: hidden entries (dot-files, `.git`, and on Windows anything with
+/// the hidden attribute), the content file itself (`content_file`, e.g.
+/// `PIFF.md`), and anything matched by `.gitignore` rules. The rules come
+/// from `dir`'s own `.gitignore` and, when `dir` is inside a git repository,
+/// from every `.gitignore` between the repository root and `dir`. Outside a
+/// repository no parent `.gitignore` is read, and global or repository-local
+/// excludes (`core.excludesFile`, `.git/info/exclude`) are never applied, so
+/// the list, and the children section written from it, is the same on every
+/// machine.
+///
+/// A child is judged by its own name only: opening an ignored directory
+/// directly still lists its contents.
 pub fn list(dir: &Path, content_file: &str) -> Result<Vec<Child>> {
     if !dir.is_dir() {
         return Err(Error::NotADirectory(dir.to_path_buf()));
     }
-    let walker = WalkBuilder::new(dir)
-        .max_depth(Some(1))
-        .hidden(true)
-        .parents(true)
-        .ignore(false)
-        .git_ignore(true)
-        .git_global(false)
-        .git_exclude(false)
-        .require_git(false)
-        .follow_links(false)
-        .build();
+    let real_dir = dir.canonicalize().map_err(|e| Error::io(dir, e))?;
+    let ignores = gitignores(&real_dir);
 
     let mut children = Vec::new();
-    for entry in walker {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(err) => match err.into_io_error() {
-                Some(io) => return Err(Error::io(dir, io)),
-                // A malformed .gitignore line is skipped, like git does.
-                None => continue,
-            },
-        };
-        if entry.depth() == 0 {
-            continue;
-        }
+    for entry in fs::read_dir(dir).map_err(|e| Error::io(dir, e))? {
+        let entry = entry.map_err(|e| Error::io(dir, e))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == content_file {
+        if name.starts_with('.') || name == content_file || is_hidden_attr(&entry) {
             continue;
         }
-        let is_dir = match entry.file_type() {
-            Some(t) if t.is_symlink() => fs::metadata(entry.path()).is_ok_and(|m| m.is_dir()),
-            Some(t) => t.is_dir(),
-            None => false,
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| Error::io(&path, e))?;
+        let is_dir = if file_type.is_symlink() {
+            fs::metadata(&path).is_ok_and(|m| m.is_dir())
+        } else {
+            file_type.is_dir()
         };
+        if is_ignored(&ignores, &real_dir.join(&name), is_dir) {
+            continue;
+        }
         children.push(Child {
             name,
-            path: entry.into_path(),
+            path,
             kind: if is_dir {
                 ChildKind::Piff
             } else {
@@ -93,6 +87,57 @@ pub fn list(dir: &Path, content_file: &str) -> Result<Vec<Child>> {
     }
     children.sort_by(compare);
     Ok(children)
+}
+
+/// The `.gitignore` matchers that apply to `dir`'s children, deepest first.
+fn gitignores(dir: &Path) -> Vec<Gitignore> {
+    let repo_root = dir.ancestors().find(|a| a.join(".git").exists());
+    let mut dirs: Vec<&Path> = match repo_root {
+        Some(root) => dir.ancestors().take_while(|a| *a != root).collect(),
+        None => vec![dir],
+    };
+    if let Some(root) = repo_root {
+        dirs.push(root);
+    }
+    dirs.into_iter()
+        .filter_map(|d| {
+            let file = d.join(".gitignore");
+            if !file.is_file() {
+                return None;
+            }
+            let mut builder = GitignoreBuilder::new(d);
+            // A malformed line is skipped, like git does.
+            let _ = builder.add(&file);
+            builder.build().ok()
+        })
+        .collect()
+}
+
+/// Git semantics: the deepest `.gitignore` with a matching rule decides, and
+/// a `!` rule re-includes.
+fn is_ignored(ignores: &[Gitignore], path: &Path, is_dir: bool) -> bool {
+    for gi in ignores {
+        match gi.matched(path, is_dir) {
+            Match::Ignore(_) => return true,
+            Match::Whitelist(_) => return false,
+            Match::None => {}
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn is_hidden_attr(entry: &fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    entry
+        .metadata()
+        .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+}
+
+#[cfg(not(windows))]
+fn is_hidden_attr(_entry: &fs::DirEntry) -> bool {
+    false
 }
 
 fn compare(a: &Child, b: &Child) -> Ordering {
