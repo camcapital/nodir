@@ -73,6 +73,12 @@ fn scan(content: &str) -> Scan {
         offset += raw.len();
         let line = raw.trim_end_matches(['\n', '\r']);
         let trimmed = line.trim_start();
+        // Fences and markers only count with up to three spaces of indent;
+        // anything deeper (or tab-indented) is indented code (CAMC-327).
+        let indent = line.len() - trimmed.len();
+        if indent > 3 || !line[..indent].bytes().all(|b| b == b' ') {
+            continue;
+        }
         if let Some((ch, len)) = fence {
             if fence_run(trimmed, ch) >= len && trimmed.trim_start_matches(ch).trim().is_empty() {
                 fence = None;
@@ -81,10 +87,6 @@ fn scan(content: &str) -> Scan {
         }
         if let Some(open) = fence_open(trimmed) {
             fence = Some(open);
-            continue;
-        }
-        let indent = line.len() - trimmed.len();
-        if indent > 3 || !line[..indent].bytes().all(|b| b == b' ') {
             continue;
         }
         let at = line_start + indent;
@@ -452,6 +454,31 @@ mod tests {
             out,
             format!("Intro\n   {START_MARKER}\n{END_MARKER}\t\nAfter\n")
         );
+    }
+
+    #[test]
+    fn indented_backticks_are_not_a_fence() {
+        // CAMC-327: a ``` line indented 4+ spaces is indented code, not a
+        // fence, so the section after it must still be found.
+        let content =
+            format!("Intro\n\n    ```\n    code\n\n{START_MARKER}\n- [old](old)\n{END_MARKER}\n");
+        let out = apply(&content, &sample(), FILE);
+        assert_eq!(
+            out,
+            format!(
+                "Intro\n\n    ```\n    code\n\n{START_MARKER}\n- [docs/](docs/PIFF.md)\n- [notes.txt](notes.txt)\n{END_MARKER}\n"
+            )
+        );
+        assert_eq!(out.matches(START_MARKER).count(), 1);
+        assert_round_trip(&content);
+
+        // Nor does a deeply indented ``` close a real fence.
+        let content = format!("```\n    ```\n{START_MARKER}\n{END_MARKER}\n```\n");
+        assert_eq!(find(&content), None);
+        // Up to three spaces still opens and closes a fence.
+        let content = format!("   ```\n{START_MARKER}\n{END_MARKER}\n   ```\n");
+        assert_eq!(find(&content), None);
+        assert_round_trip(&content);
     }
 
     #[test]
