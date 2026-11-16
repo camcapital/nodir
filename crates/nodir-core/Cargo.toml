@@ -1,0 +1,12 @@
+[package]
+name = "nodir-core"
+description = "Shared Piff model for NoDir: content, children listing and the children section"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
