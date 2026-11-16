@@ -3,6 +3,7 @@ name = "nodir-core"
 description = "Shared Piff model for NoDir: content, children listing and the children section"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
