@@ -9,6 +9,8 @@ use nodir_core::{Piff, SyncMode, SyncOutcome};
 
 mod markdown;
 
+use markdown::strip_controls;
+
 /// Browse and sync Piffs: directories with their own markdown content.
 ///
 /// Every directory is a Parent File (Piff). Its content lives in a PIFF.md
@@ -72,7 +74,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) if is_broken_pipe(&err) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("nodir: {err:#}");
+            eprintln!("nodir: {}", strip_controls(&format!("{err:#}")));
             ExitCode::FAILURE
         }
     }
@@ -93,7 +95,7 @@ fn show(path: &Path) -> Result<()> {
     let content = piff.render()?;
     let mut out = io::stdout().lock();
     if styled() {
-        let title = format!("\x1b[1;7m {} \x1b[0m", piff.name());
+        let title = format!("\x1b[1;7m {} \x1b[0m", strip_controls(&piff.name()));
         writeln!(out, "{title}")?;
         if !piff.has_content() {
             writeln!(
@@ -114,12 +116,20 @@ fn show(path: &Path) -> Result<()> {
 fn ls(path: &Path) -> Result<()> {
     let piff = Piff::open(path)?;
     let color = styled();
+    let tty = io::stdout().is_terminal();
     let mut out = io::stdout().lock();
     for child in piff.children()? {
+        // File names can contain escape sequences too; only a pipe gets
+        // them verbatim.
+        let name = if tty {
+            strip_controls(&child.name)
+        } else {
+            child.name.as_str().into()
+        };
         match (child.is_piff(), color) {
-            (true, true) => writeln!(out, "\x1b[1;34m{}/\x1b[0m", child.name)?,
-            (true, false) => writeln!(out, "{}/", child.name)?,
-            (false, _) => writeln!(out, "{}", child.name)?,
+            (true, true) => writeln!(out, "\x1b[1;34m{name}/\x1b[0m")?,
+            (true, false) => writeln!(out, "{name}/")?,
+            (false, _) => writeln!(out, "{name}")?,
         }
     }
     out.flush()?;
@@ -129,37 +139,55 @@ fn ls(path: &Path) -> Result<()> {
 fn sync(path: &Path, recursive: bool) -> Result<()> {
     let piff = Piff::open(path)?;
     let reports = if recursive {
-        piff.sync_recursive(SyncMode::CreateIfMissing)?
+        piff.sync_recursive(SyncMode::CreateIfMissing)
     } else {
         vec![nodir_core::SyncReport {
             path: piff.content_path(),
-            outcome: piff.sync(SyncMode::CreateIfMissing)?,
+            result: piff.sync(SyncMode::CreateIfMissing),
         }]
     };
-    let (mut created, mut updated, mut unchanged) = (0, 0, 0);
+    let tty = io::stdout().is_terminal();
+    let (mut created, mut updated, mut unchanged, mut failed) = (0, 0, 0, 0);
     let mut out = io::stdout().lock();
     for report in &reports {
-        match report.outcome {
-            SyncOutcome::Created => {
+        let shown = report.path.display().to_string();
+        let shown = if tty {
+            strip_controls(&shown)
+        } else {
+            shown.as_str().into()
+        };
+        match &report.result {
+            Ok(SyncOutcome::Created) => {
                 created += 1;
-                writeln!(out, "created {}", report.path.display())?;
+                writeln!(out, "created {shown}")?;
             }
-            SyncOutcome::Updated => {
+            Ok(SyncOutcome::Updated) => {
                 updated += 1;
-                writeln!(out, "updated {}", report.path.display())?;
+                writeln!(out, "updated {shown}")?;
             }
-            SyncOutcome::Unchanged | SyncOutcome::Skipped => unchanged += 1,
+            Ok(SyncOutcome::Unchanged | SyncOutcome::Skipped) => unchanged += 1,
+            Err(err) => {
+                failed += 1;
+                out.flush()?;
+                eprintln!("nodir: {}", strip_controls(&err.to_string()));
+            }
         }
     }
+    let total = created + updated + unchanged;
     if recursive || created + updated == 0 {
         writeln!(
             out,
-            "{} Piff{} synced: {created} created, {updated} updated, {unchanged} unchanged",
-            reports.len(),
-            if reports.len() == 1 { "" } else { "s" },
+            "{total} Piff{} synced: {created} created, {updated} updated, {unchanged} unchanged",
+            if total == 1 { "" } else { "s" },
         )?;
     }
     out.flush()?;
+    if failed > 0 {
+        bail!(
+            "{failed} Piff{} could not be synced",
+            if failed == 1 { "" } else { "s" }
+        );
+    }
     Ok(())
 }
 

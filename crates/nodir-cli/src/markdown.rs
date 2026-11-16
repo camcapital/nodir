@@ -3,6 +3,8 @@
 //! HTML comments (including the children-section markers) are hidden. Lines
 //! are not wrapped; the terminal does that.
 
+use std::borrow::Cow;
+
 use nodir_core::section::START_MARKER;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -18,15 +20,31 @@ const YELLOW: &str = "33";
 const GREEN: &str = "32";
 
 /// Renders `markdown` with ANSI escape codes.
+///
+/// Control characters in `markdown` (escape sequences, OSC title changes,
+/// bells, ...) are removed first, so untrusted content can only ever be
+/// styled by NoDir, never drive the terminal itself.
 pub fn to_ansi(markdown: &str) -> String {
+    let markdown = strip_controls(markdown);
     let mut r = Renderer::default();
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    for event in Parser::new_ext(markdown, options) {
+    for event in Parser::new_ext(&markdown, options) {
         r.event(event);
     }
     let mut out = r.out.trim_end().to_string();
     out.push('\n');
     out
+}
+
+/// Removes C0 and C1 control characters (including ESC and CR) except tab
+/// and line feed, so text is safe to print to a terminal.
+pub fn strip_controls(text: &str) -> Cow<'_, str> {
+    let keep = |c: char| !c.is_control() || c == '\n' || c == '\t';
+    if text.chars().all(keep) {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(text.chars().filter(|&c| keep(c)).collect())
+    }
 }
 
 #[derive(Default)]
@@ -322,6 +340,28 @@ mod tests {
             "[site](https://example.com) and [local](a/PIFF.md)\n",
         ));
         assert_eq!(out, "site <https://example.com> and local\n");
+    }
+
+    #[test]
+    fn terminal_control_sequences_in_content_are_stripped() {
+        let md = "hi \x1b[31mRED\x1b]0;pwned\x07 \u{9b}2J done\r\n\n```\n\x1b[2Jcode\n```\n";
+        let out = to_ansi(md);
+        // Only NoDir's own SGR sequences remain: ESC followed by `[` and
+        // digits/semicolons ending in `m`.
+        let mut rest = out.as_str();
+        while let Some(i) = rest.find('\x1b') {
+            let seq = &rest[i + 1..];
+            let end = seq.find('m').expect("unterminated escape");
+            assert!(seq.starts_with('['), "{out:?}");
+            assert!(
+                seq[1..end].chars().all(|c| c.is_ascii_digit() || c == ';'),
+                "{out:?}"
+            );
+            rest = &seq[end..];
+        }
+        assert!(!out.contains('\x07') && !out.contains('\u{9b}') && !out.contains('\r'));
+        assert_eq!(plain(&out), "hi [31mRED]0;pwned 2J done\n\n    [2Jcode\n");
+        assert_eq!(strip_controls("tab\tok\n"), "tab\tok\n");
     }
 
     #[test]

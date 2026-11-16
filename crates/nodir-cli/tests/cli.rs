@@ -203,3 +203,37 @@ fn edit_syncs_after_the_editor_exits() {
     assert!(content.contains("- [added.md](added.md)"));
     assert!(content.ends_with("<!-- nodir:children:end -->\ntail\n"));
 }
+
+#[test]
+fn sync_reports_errors_and_keeps_going() {
+    let tmp = sample_tree();
+    let root = tmp.path();
+    fs::write(root.join("docs/PIFF.md"), b"\xff not utf-8").unwrap();
+    nodir()
+        .args(["sync", "-r"])
+        .arg(root)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is not valid UTF-8"))
+        .stderr(predicates::str::contains("1 Piff could not be synced"));
+    assert!(root.join("src/core/PIFF.md").is_file());
+    assert_eq!(
+        fs::read(root.join("docs/PIFF.md")).unwrap(),
+        b"\xff not utf-8"
+    );
+}
+
+#[test]
+fn sync_keeps_text_after_the_section_that_mentions_the_end_marker() {
+    // Regression for the review repro: the user's notes after the section
+    // quote the end marker.
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir(tmp.path().join("sub")).unwrap();
+    let original = "# Doc\n\n<!-- nodir:children:start -->\n- [old](old)\n<!-- nodir:children:end -->\n\nIMPORTANT user notes here.\nThe block ends at `<!-- nodir:children:end -->`.\n";
+    fs::write(tmp.path().join("PIFF.md"), original).unwrap();
+    nodir().arg("sync").arg(tmp.path()).assert().success();
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("PIFF.md")).unwrap(),
+        original.replace("- [old](old)", "- [sub/](sub/PIFF.md)")
+    );
+}
