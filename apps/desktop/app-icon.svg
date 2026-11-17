@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#2f6fdb"/>
+  <!-- A page with a folded corner: a file that is also a folder. -->
+  <path d="M300 220 H620 L744 344 V804 H300 Z" fill="#ffffff"/>
+  <path d="M620 220 V344 H744 Z" fill="#b9cff5"/>
+  <rect x="370" y="430" width="300" height="34" rx="17" fill="#2f6fdb"/>
+  <rect x="370" y="520" width="230" height="34" rx="17" fill="#2f6fdb" opacity="0.6"/>
+  <rect x="410" y="610" width="230" height="34" rx="17" fill="#2f6fdb" opacity="0.6"/>
+  <rect x="410" y="700" width="180" height="34" rx="17" fill="#2f6fdb" opacity="0.6"/>
+</svg>
