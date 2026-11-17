@@ -1,4 +1,5 @@
-//! Renders markdown as ANSI-styled terminal text for `nodir show`.
+//! Renders markdown as ANSI-styled terminal text for `nodir show`, and as
+//! styled ratatui text for the browser.
 //!
 //! HTML comments (including the children-section markers) are hidden. Lines
 //! are not wrapped; the terminal does that.
@@ -7,6 +8,8 @@ use std::borrow::Cow;
 
 use nodir_core::section::START_MARKER;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 
 const BOLD: &str = "1";
 const DIM: &str = "2";
@@ -34,6 +37,63 @@ pub fn to_ansi(markdown: &str) -> String {
     let mut out = r.out.trim_end().to_string();
     out.push('\n');
     out
+}
+
+/// Renders `markdown` as styled text for the browser.
+///
+/// This is [`to_ansi`] with its SGR sequences turned into ratatui styles, so
+/// `nodir show` and the browser always render a Piff the same way. Tabs are
+/// expanded to four spaces, since a terminal cell grid has no tab stops.
+pub fn to_text(markdown: &str) -> Text<'static> {
+    let ansi = to_ansi(markdown);
+    let ansi = ansi.strip_suffix('\n').unwrap_or(&ansi);
+    ansi.split('\n').map(ansi_line).collect()
+}
+
+/// Converts one line of [`to_ansi`] output. Its only escape sequences are
+/// NoDir's own SGR codes; content was stripped of control characters.
+fn ansi_line(line: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut style = Style::default();
+    let mut rest = line;
+    while !rest.is_empty() {
+        let (text, next) = match rest.find('\x1b') {
+            Some(i) => rest.split_at(i),
+            None => (rest, ""),
+        };
+        if !text.is_empty() {
+            spans.push(Span::styled(text.replace('\t', "    "), style));
+        }
+        rest = next;
+        if let Some(seq) = rest.strip_prefix("\x1b[") {
+            let end = seq.find('m').unwrap_or(seq.len());
+            style = apply_sgr(style, &seq[..end]);
+            rest = seq.get(end + 1..).unwrap_or("");
+        } else if !rest.is_empty() {
+            rest = &rest[1..];
+        }
+    }
+    Line::from(spans)
+}
+
+fn apply_sgr(mut style: Style, codes: &str) -> Style {
+    for code in codes.split(';') {
+        style = match code {
+            "" | "0" => Style::default(),
+            BOLD => style.add_modifier(Modifier::BOLD),
+            DIM => style.add_modifier(Modifier::DIM),
+            ITALIC => style.add_modifier(Modifier::ITALIC),
+            UNDERLINE => style.add_modifier(Modifier::UNDERLINED),
+            STRIKE => style.add_modifier(Modifier::CROSSED_OUT),
+            BLUE => style.fg(Color::Blue),
+            MAGENTA => style.fg(Color::Magenta),
+            CYAN => style.fg(Color::Cyan),
+            YELLOW => style.fg(Color::Yellow),
+            GREEN => style.fg(Color::Green),
+            _ => style,
+        };
+    }
+    style
 }
 
 /// Removes C0 and C1 control characters (including ESC and CR) except tab
@@ -362,6 +422,28 @@ mod tests {
         assert!(!out.contains('\x07') && !out.contains('\u{9b}') && !out.contains('\r'));
         assert_eq!(plain(&out), "hi [31mRED]0;pwned 2J done\n\n    [2Jcode\n");
         assert_eq!(strip_controls("tab\tok\n"), "tab\tok\n");
+    }
+
+    #[test]
+    fn text_carries_the_same_styles_as_ansi() {
+        let text = to_text("# Title\n\nSome *em* and `code`\tx and [link](a/PIFF.md).\n");
+        let lines: Vec<String> = text.lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(lines, ["Title", "", "Some em and code    x and link."]);
+
+        let heading = &text.lines[0].spans[0];
+        assert_eq!(heading.style.fg, Some(Color::Magenta));
+        assert!(heading
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD | Modifier::UNDERLINED));
+
+        let spans = &text.lines[2].spans;
+        let find = |s: &str| spans.iter().find(|sp| sp.content == s).unwrap().style;
+        assert!(find("em").add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(find("code").fg, Some(Color::Yellow));
+        assert_eq!(find("link").fg, Some(Color::Blue));
+        assert_eq!(find("Some "), Style::default());
+        assert!(!text.to_string().contains('\x1b'));
     }
 
     #[test]

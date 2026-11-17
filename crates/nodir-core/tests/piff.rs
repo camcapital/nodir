@@ -370,3 +370,26 @@ fn symlinked_content_file_is_written_through() {
         .unwrap()
         .contains("- [a.txt](a.txt)"));
 }
+
+#[test]
+fn parent_and_open_child_walk_the_tree() {
+    let tmp = TempDir::new().unwrap();
+    touch(&tmp.path().join("a/b/file.md"));
+    let root = Piff::open(tmp.path()).unwrap();
+
+    let a = root.children().unwrap().remove(0);
+    let a = root.open_child(&a).unwrap();
+    assert_eq!(a.dir(), tmp.path().join("a"));
+    let b = a.open_child(&a.children().unwrap()[0]).unwrap();
+    let file = &b.children().unwrap()[0];
+    assert_eq!(file.kind, ChildKind::File);
+    assert!(matches!(b.open_child(file), Err(Error::NotADirectory(_))));
+
+    let up = b.parent().unwrap().parent().unwrap();
+    assert_eq!(up.dir(), tmp.path());
+    // Walking up never writes anything.
+    assert!(!up.has_content() && !a.has_content() && !b.has_content());
+
+    // Lexical: a bare relative path has no parent to walk to.
+    assert!(Piff::open(".").unwrap().parent().is_none());
+}

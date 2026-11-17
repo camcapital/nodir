@@ -1,13 +1,15 @@
 use std::env;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use nodir_core::{Piff, SyncMode, SyncOutcome};
 
+mod editor;
 mod markdown;
+mod tui;
 
 use markdown::strip_controls;
 
@@ -15,9 +17,19 @@ use markdown::strip_controls;
 ///
 /// Every directory is a Parent File (Piff). Its content lives in a PIFF.md
 /// inside it, and NoDir keeps a list of its children at the end of that file.
+///
+/// Run `nodir [path]` without a subcommand to browse Piffs interactively.
 #[derive(Parser)]
-#[command(name = "nodir", version, about, long_about)]
+#[command(
+    name = "nodir",
+    version,
+    about,
+    long_about,
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
+    /// The Piff (directory) to open in the browser.
+    path: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Cmd>,
 }
@@ -64,11 +76,7 @@ fn main() -> ExitCode {
         Some(Cmd::Ls { path }) => ls(&path),
         Some(Cmd::Sync { path, recursive }) => sync(&path, recursive),
         Some(Cmd::Edit { path }) => edit(&path),
-        // `nodir [path]` opens the TUI browser (CAMC-322). Until then, help.
-        None => {
-            use clap::CommandFactory;
-            Cli::command().print_long_help().map_err(Into::into)
-        }
+        None => tui::run(&cli.path.unwrap_or_else(|| ".".into())),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -192,64 +200,5 @@ fn sync(path: &Path, recursive: bool) -> Result<()> {
 }
 
 fn edit(path: &Path) -> Result<()> {
-    let piff = Piff::open(path)?;
-    if !piff.has_content() {
-        piff.write_content(&format!("# {}\n", piff.name()))?;
-    } else {
-        piff.sync(SyncMode::ExistingOnly)?;
-    }
-    let file = piff.content_path();
-    run_editor(&file)?;
-    // The user may have deleted the file in the editor; don't recreate it.
-    piff.sync(SyncMode::ExistingOnly)?;
-    Ok(())
-}
-
-/// The user's editor command: $VISUAL, then $EDITOR, then a platform default.
-fn editor() -> String {
-    ["VISUAL", "EDITOR"]
-        .iter()
-        .filter_map(|var| env::var(var).ok())
-        .find(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                "notepad".into()
-            } else {
-                "vi".into()
-            }
-        })
-}
-
-/// Runs the editor through the shell, like git does, so values such as
-/// `code --wait` or a quoted path with spaces work.
-fn run_editor(file: &Path) -> Result<()> {
-    let editor = editor();
-    let status = editor_command(&editor, file)
-        .status()
-        .with_context(|| format!("could not start editor `{editor}`"))?;
-    if !status.success() {
-        bail!("editor `{editor}` exited with {status}");
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn editor_command(editor: &str, file: &Path) -> Command {
-    use std::os::windows::process::CommandExt;
-    let mut cmd = Command::new("cmd");
-    // cmd.exe has its own quoting rules: with /S it strips the outer quotes
-    // and runs the rest verbatim, so pass the line through raw_arg.
-    cmd.args(["/S", "/C"])
-        .raw_arg(format!("\"{editor} \"{}\"\"", file.display()));
-    cmd
-}
-
-#[cfg(not(windows))]
-fn editor_command(editor: &str, file: &Path) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(format!("{editor} \"$@\""))
-        .arg(editor)
-        .arg(file);
-    cmd
+    editor::edit_piff(&Piff::open(path)?, editor::run_editor)
 }
