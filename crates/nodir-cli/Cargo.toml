@@ -16,6 +16,7 @@ nodir-core.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1"
 pulldown-cmark = { version = "0.13", default-features = false }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "unstable-rendered-line-info"] }
 
 [lints]
 workspace = true
