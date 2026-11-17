@@ -51,9 +51,15 @@ impl Root {
         }
     }
 
-    /// `path`, normalized, if it lies inside the root. The check is lexical,
-    /// so a symlinked child Piff that `nodir-core` lists can be opened even
-    /// though it points elsewhere, but `..` can never climb out.
+    /// `path`, normalized, if it lies inside the root.
+    ///
+    /// The check is lexical: `..` can never climb out of the root, but
+    /// symlinks are not resolved. `nodir-core` lists a symlinked directory as
+    /// a Piff, so a symlink inside the root that points outside it can be
+    /// browsed and read, and opening it syncs that Piff's existing `PIFF.md`
+    /// through the link. That is deliberate, since the user chose to open it,
+    /// but it means confinement covers path syntax, not the file system.
+    /// (`Piff::sync_recursive`, by contrast, never follows symlinks.)
     pub fn contain(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
         let path = path.as_ref();
         let joined = if path.is_absolute() {

@@ -52,14 +52,21 @@ async function pickRoot() {
 
 // ---------- navigation ----------
 
+/** Bumped on every navigation, so only the latest one renders. */
+let navigationSeq = 0;
+
 async function navigate(loc: Location, push = true) {
+  const seq = ++navigationSeq;
+  // A slower, older request must not overwrite a newer one.
+  const stale = () => seq !== navigationSeq;
   let view: PiffView | FileView;
   try {
     view = loc.isPiff ? await api.openPiff(loc.path) : await api.openFile(loc.path);
   } catch (err) {
-    showNotice(String(err), "error");
+    if (!stale()) showNotice(String(err), "error");
     return;
   }
+  if (stale()) return;
   if (push) {
     state.history = state.history.slice(0, state.historyIndex + 1);
     state.history.push(loc);
@@ -75,6 +82,7 @@ async function navigate(loc: Location, push = true) {
   // A Piff that was just opened may have new children; refetch it.
   if (loc.isPiff) state.children.delete(loc.path);
   await loadExpanded();
+  if (stale()) return;
 
   renderBreadcrumb(view.breadcrumb);
   if ("hasContent" in view) renderPiff(view);
