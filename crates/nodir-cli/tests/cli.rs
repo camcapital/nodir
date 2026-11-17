@@ -237,3 +237,15 @@ fn sync_keeps_text_after_the_section_that_mentions_the_end_marker() {
         original.replace("- [old](old)", "- [sub/](sub/PIFF.md)")
     );
 }
+
+#[test]
+fn browser_needs_a_terminal() {
+    let tmp = sample_tree();
+    let before = snapshot(tmp.path());
+    nodir()
+        .arg(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("nodir show"));
+    assert_eq!(snapshot(tmp.path()), before);
+}

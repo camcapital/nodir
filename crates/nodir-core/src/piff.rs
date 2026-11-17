@@ -125,6 +125,28 @@ impl Piff {
         children::list(&self.dir, self.provider.file_name())
     }
 
+    /// The Piff that contains this one, with the same content provider.
+    ///
+    /// The parent is found lexically from [`Piff::dir`], so it is `None` at
+    /// a filesystem root and for a bare relative path such as `notes` or
+    /// `.`; open an absolute path to be able to walk all the way up.
+    pub fn parent(&self) -> Option<Piff> {
+        let parent = self.dir.parent()?;
+        if parent.as_os_str().is_empty() {
+            return None;
+        }
+        Some(Self {
+            dir: parent.to_path_buf(),
+            provider: self.provider,
+        })
+    }
+
+    /// Opens a child Piff (as listed by [`Piff::children`]) with the same
+    /// content provider. Fails with [`Error::NotADirectory`] for a file.
+    pub fn open_child(&self, child: &Child) -> Result<Piff> {
+        Self::with_provider(&child.path, self.provider)
+    }
+
     /// The Piff's content with an up-to-date children section, computed in
     /// memory. Nothing is written, even if the content file is missing or
     /// its section is stale.
