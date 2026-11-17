@@ -1,6 +1,6 @@
 # Pinned so a new stable release (and its new clippy lints) can't turn main
 # red without a code change. Bump deliberately.
 [toolchain]
-channel = "1.89.0"
+channel = "1.90.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
