@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/nodir-core", "crates/nodir-cli"]
-# apps/desktop (Tauri v2) joins the workspace in stage 2.
+members = ["crates/nodir-core", "crates/nodir-cli", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

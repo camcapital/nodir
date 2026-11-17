@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NoDir</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header class="sidebar-header">
+          <span id="root-name" class="root-name">No folder open</span>
+          <button id="open-folder" type="button" title="Open folder…">Open…</button>
+        </header>
+        <nav id="tree" aria-label="Piffs"></nav>
+      </aside>
+      <main id="main">
+        <header class="toolbar">
+          <button id="back" type="button" title="Back" aria-label="Back" disabled>‹</button>
+          <button id="forward" type="button" title="Forward" aria-label="Forward" disabled>›</button>
+          <nav id="breadcrumb" aria-label="Breadcrumb"></nav>
+        </header>
+        <div id="notice" hidden></div>
+        <article id="content"></article>
+      </main>
+    </div>
+  </body>
+</html>
