@@ -59,6 +59,16 @@ export type Target =
   | { kind: "external"; url: string }
   | { kind: "anchor"; id: string };
 
+/** The outcome of a file operation. */
+export interface Done {
+  /** The new or renamed item, or the trashed item's old path. */
+  path: string;
+  /** The Piff the item is (or was) in. */
+  parent: string;
+  /** Set when the parent's children section could not be updated. */
+  warning: string | null;
+}
+
 export const api = {
   restoreRoot: () => invoke<RootInfo | null>("restore_root"),
   pickRoot: () => invoke<RootInfo | null>("pick_root"),
@@ -77,4 +87,10 @@ export const api = {
   openWithDefaultApp: (path: string) =>
     invoke<void>("open_with_default_app", { path }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
+  createPiff: (parent: string, name: string, title: string | null) =>
+    invoke<Done>("create_piff", { parent, name, title }),
+  createFile: (parent: string, name: string) => invoke<Done>("create_file", { parent, name }),
+  renameEntry: (path: string, newName: string) =>
+    invoke<Done>("rename_entry", { path, newName }),
+  trashEntry: (path: string) => invoke<Done>("trash_entry", { path }),
 };

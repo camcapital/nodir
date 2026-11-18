@@ -1,4 +1,4 @@
-//! The NoDir desktop app: browse, read and edit Piffs.
+//! The NoDir desktop app: browse, read, edit and organize Piffs.
 //!
 //! The webview only draws. Everything about Piffs goes through `nodir-core`
 //! via the Tauri commands below, and every path the frontend passes in is
@@ -19,7 +19,7 @@ mod menu;
 mod render;
 mod watch;
 
-use browse::{Entry, FileView, PiffView, Result, Root, RootInfo, Target};
+use browse::{Done, Entry, FileView, PiffView, Result, Root, RootInfo, Target};
 use edit::{PiffDoc, SaveResult};
 
 /// The root folder currently open, if any, and the watch on the `PIFF.md`
@@ -152,6 +152,31 @@ fn resolve_link(state: State<'_, AppState>, from: String, href: String) -> Resul
     state.root()?.resolve_link(&from, &href)
 }
 
+#[tauri::command]
+fn create_piff(
+    state: State<'_, AppState>,
+    parent: String,
+    name: String,
+    title: Option<String>,
+) -> Result<Done> {
+    state.root()?.create_piff(&parent, &name, title.as_deref())
+}
+
+#[tauri::command]
+fn create_file(state: State<'_, AppState>, parent: String, name: String) -> Result<Done> {
+    state.root()?.create_file(&parent, &name)
+}
+
+#[tauri::command]
+fn rename_entry(state: State<'_, AppState>, path: String, new_name: String) -> Result<Done> {
+    state.root()?.rename(&path, &new_name)
+}
+
+#[tauri::command]
+fn trash_entry(state: State<'_, AppState>, path: String) -> Result<Done> {
+    state.root()?.trash(&path)
+}
+
 /// Opens a file inside the root with the OS default app.
 #[tauri::command]
 fn open_with_default_app(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<()> {
@@ -205,6 +230,10 @@ pub fn run() {
             resolve_link,
             open_with_default_app,
             open_url,
+            create_piff,
+            create_file,
+            rename_entry,
+            trash_entry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the NoDir desktop app");

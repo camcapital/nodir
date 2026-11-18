@@ -10,6 +10,10 @@ repository.workspace = true
 [dependencies]
 ignore = "0.4"
 thiserror = "2"
+trash = "5"
+
+[target.'cfg(not(unix))'.dependencies]
+same-file = "1"
 
 [lints]
 workspace = true

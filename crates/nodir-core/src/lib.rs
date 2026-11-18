@@ -11,12 +11,15 @@
 //! - [`section`] writes, regenerates and parses the NoDir-owned block between
 //!   [`section::START_MARKER`] and [`section::END_MARKER`], leaving every byte
 //!   outside it untouched.
+//! - [`ops`] creates, renames and trashes Piffs and files, keeping the
+//!   parent's children section up to date.
 //! - [`provider`] locates a Piff's content file.
 
 use std::io;
 use std::path::PathBuf;
 
 pub mod children;
+pub mod ops;
 mod piff;
 pub mod provider;
 pub mod section;
@@ -34,6 +37,9 @@ pub enum Error {
     /// The path is not a directory, so it cannot be a Piff.
     #[error("{} is not a directory (only directories are Piffs)", .0.display())]
     NotADirectory(PathBuf),
+    /// A name (or path) cannot be used for a new or renamed entry.
+    #[error("{0:?}: {1}")]
+    InvalidName(String, String),
     /// The content file is not valid UTF-8; NoDir refuses to rewrite it.
     #[error("{} is not valid UTF-8", .0.display())]
     NotUtf8(PathBuf),
