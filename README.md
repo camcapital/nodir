@@ -21,6 +21,8 @@ NoDir owns only the text between `<!-- nodir:children:start -->` and `<!-- nodir
 
 `apps/desktop` is a Tauri v2 app for browsing and reading Piffs: open a folder, move through it with the sidebar tree, the breadcrumb or the links in each Piff, and read Piffs and files rendered as markdown. Opening a Piff updates the children section of its `PIFF.md` only if that file already exists; nothing is created just because you browsed.
 
+Right-click an item in the tree, or use the shortcuts, to create, rename or delete Piffs and files: ⌘/Ctrl+N for a new file, ⌘/Ctrl+Shift+N for a new Piff, F2 to rename, and ⌘⌫ (macOS) or Del to delete. Each change also updates the parent Piff's children section, if it has a `PIFF.md`. Nothing is deleted permanently: items go to the Trash or Recycle Bin. On macOS, Finder may not offer **Put Back** for an item NoDir deleted; drag it out of the Trash to restore it.
+
 ```sh
 cd apps/desktop
 npm install

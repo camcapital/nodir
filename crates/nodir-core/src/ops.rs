@@ -67,14 +67,17 @@ pub fn create_file(parent: &Path, name: &str) -> Result<Changed> {
 /// Fails if another entry named `new_name` already exists; nothing is ever
 /// overwritten. A change of case only (`notes` to `Notes`) works on
 /// case-insensitive file systems too. A symlink is renamed, not its target.
+///
+/// The check is made just before renaming, so an entry created by another
+/// program in between can still be replaced.
 pub fn rename(path: &Path, new_name: &str) -> Result<Changed> {
     let parent = split_entry(path)?;
-    let new_path = parent.dir().join(check_name(new_name)?);
+    let new_name = check_name(new_name)?;
+    let new_path = parent.dir().join(new_name);
     if new_path == path {
         return Ok(finish(&parent, new_path));
     }
-    // `symlink_metadata` so a dangling symlink still counts as taken.
-    if fs::symlink_metadata(&new_path).is_ok() && !same_entry(path, &new_path) {
+    if is_taken(path, parent.dir(), new_name)? {
         return Err(Error::io(
             &new_path,
             io::Error::new(io::ErrorKind::AlreadyExists, "already exists"),
@@ -145,10 +148,13 @@ fn split_entry(path: &Path) -> Result<Piff> {
     Piff::open(parent)
 }
 
-/// Checks that `name` is a single, portable file name, and returns it.
+/// Checks that `name` is a single, portable file name, and returns it
+/// without leading or trailing whitespace, which is easy to type by accident
+/// and hard to spot afterwards.
 fn check_name(name: &str) -> Result<&str> {
+    let name = name.trim();
     let bad = |why: &str| Err(Error::InvalidName(name.to_string(), why.to_string()));
-    if name.trim().is_empty() {
+    if name.is_empty() {
         return bad("a name cannot be empty");
     }
     if name == "." || name == ".." {
@@ -193,21 +199,57 @@ fn is_reserved_on_windows(stem: &str) -> bool {
     }
 }
 
+/// Whether renaming `path` to `new_name` in `dir` would replace another
+/// entry.
+///
+/// It would if `dir` has an entry named exactly `new_name`. Otherwise, if
+/// `new_name` still resolves to something, the file system matched it
+/// case-insensitively, and it is free only if what it resolves to is `path`
+/// itself (a case-only rename). That is never assumed from the names alone:
+/// on a case-sensitive file system `Notes` and `notes` are two entries.
+fn is_taken(path: &Path, dir: &Path, new_name: &str) -> Result<bool> {
+    let entries = fs::read_dir(dir).map_err(|e| Error::io(dir, e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::io(dir, e))?;
+        if entry.file_name() == new_name {
+            return Ok(true);
+        }
+    }
+    let new_path = dir.join(new_name);
+    // `symlink_metadata` so a dangling symlink still counts as taken.
+    match fs::symlink_metadata(&new_path) {
+        Ok(_) => Ok(!same_entry(path, &new_path)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(Error::io(new_path, e)),
+    }
+}
+
 /// Whether two paths name the same directory entry, e.g. `notes` and
-/// `Notes` on a case-insensitive file system.
+/// `Notes` on a case-insensitive file system. Compares the entries
+/// themselves, never what a symlink points to.
+#[cfg(unix)]
 fn same_entry(a: &Path, b: &Path) -> bool {
-    // Compare the entries themselves, not what a symlink points to.
+    use std::os::unix::fs::MetadataExt;
+    match (fs::symlink_metadata(a), fs::symlink_metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+        _ => false,
+    }
+}
+
+/// Whether two paths name the same directory entry. Windows has no stable
+/// way to read a symlink's own file index, so a symlink only matches a path
+/// in the same directory whose name differs in case alone, which on a
+/// case-insensitive NTFS directory (the default) is the same entry.
+#[cfg(not(unix))]
+fn same_entry(a: &Path, b: &Path) -> bool {
     let (Ok(ma), Ok(mb)) = (fs::symlink_metadata(a), fs::symlink_metadata(b)) else {
         return false;
     };
     if ma.file_type().is_symlink() || mb.file_type().is_symlink() {
-        return match (a.parent(), b.parent(), a.file_name(), b.file_name()) {
-            (Some(pa), Some(pb), Some(na), Some(nb)) => {
-                pa == pb
-                    && na.to_string_lossy().to_lowercase() == nb.to_string_lossy().to_lowercase()
-            }
-            _ => false,
-        };
+        return ma.file_type().is_symlink() == mb.file_type().is_symlink()
+            && a.parent() == b.parent()
+            && a.file_name().map(|n| n.to_string_lossy().to_lowercase())
+                == b.file_name().map(|n| n.to_string_lossy().to_lowercase());
     }
     same_file::is_same_file(a, b).unwrap_or(false)
 }
@@ -376,6 +418,58 @@ mod tests {
         for stem in ["CONSOLE", "COM0", "COM", "A€", "€A"] {
             assert!(!is_reserved_on_windows(stem), "{stem}");
         }
+    }
+
+    #[test]
+    fn names_are_trimmed() {
+        let tmp = root();
+        let done = create_file(tmp.path(), "  notes.md \t").unwrap();
+        assert_eq!(done.path, tmp.path().join("notes.md"));
+        let done = rename(&done.path, " plan.md ").unwrap();
+        assert_eq!(done.path, tmp.path().join("plan.md"));
+        assert!(done.path.is_file());
+    }
+
+    /// On a case-sensitive file system `Notes` and `notes` are two entries,
+    /// even when one of them is a symlink, so renaming one onto the other
+    /// must fail rather than replace it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rename_never_overwrites_an_entry_differing_only_in_case() {
+        let tmp = root();
+        fs::create_dir(tmp.path().join("target")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("target"), tmp.path().join("Notes")).unwrap();
+        fs::write(tmp.path().join("notes"), "keep").unwrap();
+        assert!(rename(&tmp.path().join("Notes"), "notes").is_err());
+        assert!(rename(&tmp.path().join("notes"), "Notes").is_err());
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("notes")).unwrap(),
+            "keep"
+        );
+        assert!(fs::symlink_metadata(tmp.path().join("Notes"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    /// Where the file system ignores case (macOS and Windows by default), a
+    /// symlink's name can change case too.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_can_change_case_only() {
+        let tmp = root();
+        fs::create_dir(tmp.path().join("target")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("target"), tmp.path().join("link")).unwrap();
+        if fs::symlink_metadata(tmp.path().join("LINK")).is_err() {
+            return; // case-sensitive: `LINK` is simply a new name
+        }
+        rename(&tmp.path().join("link"), "Link").unwrap();
+        let names: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"Link".to_string()), "{names:?}");
+        assert!(!names.contains(&"link".to_string()), "{names:?}");
     }
 
     #[cfg(unix)]

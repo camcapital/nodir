@@ -259,32 +259,39 @@ function ask(opts: Ask): Promise<Done | null> {
   }
 
   return new Promise((resolve) => {
+    // While the operation runs, the dialog can't be dismissed: it would
+    // finish on disk anyway, and the tree would not be refreshed.
+    let busy = false;
     const close = (result: Done | null) => {
       backdrop.remove();
       dialogOpen = false;
       previousFocus?.focus();
       resolve(result);
     };
-    cancel.addEventListener("click", () => close(null));
+    cancel.addEventListener("click", () => {
+      if (!busy) close(null);
+    });
     backdrop.addEventListener("mousedown", (e) => {
-      if (e.target === backdrop) close(null);
+      if (e.target === backdrop && !busy) close(null);
     });
     form.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        close(null);
+        if (!busy) close(null);
       }
     });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      if (submit.disabled) return;
-      submit.disabled = true;
+      if (busy) return;
+      busy = true;
+      submit.disabled = cancel.disabled = true;
       try {
         close(await opts.run(inputs.map((i) => i.value)));
       } catch (err) {
         error.textContent = String(err);
         error.hidden = false;
-        submit.disabled = false;
+        busy = false;
+        submit.disabled = cancel.disabled = false;
         first?.focus();
       }
     });
