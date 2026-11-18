@@ -182,12 +182,17 @@ jobs:
           ls -l out
           test -n "$(ls out)"
 
+      # Check the app users get: the one inside the .dmg.
       - name: Check the app's signature (macOS)
         if: runner.os == 'macOS'
         run: |
-          app="target/universal-apple-darwin/release/bundle/macos/NoDir.app"
+          mnt=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" out/*.dmg
+          app="$mnt/NoDir.app"
           codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | grep -E '^(Signature|Identifier|Format)'
           lipo -info "$app/Contents/MacOS/"*
+          hdiutil detach "$mnt"
 
       - uses: actions/upload-artifact@v4
         with:
