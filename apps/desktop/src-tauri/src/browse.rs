@@ -13,6 +13,7 @@ use nodir_core::{Child, ChildKind, Piff, SyncMode, CONTENT_FILE_NAME};
 use percent_encoding::percent_decode_str;
 use serde::Serialize;
 
+use crate::edit::{self, PiffDoc};
 use crate::render;
 
 /// Files larger than this are not loaded into the main pane.
@@ -108,22 +109,26 @@ impl Root {
         Ok(children.into_iter().map(Entry::from).collect())
     }
 
-    /// Opens the Piff at `path` for reading. Its children section is
-    /// regenerated only if `PIFF.md` already exists; a Piff without one is
-    /// rendered in memory and nothing is written.
-    pub fn open_piff(&self, path: &str) -> Result<PiffView> {
+    /// The Piff at `path`, which must be inside the root.
+    pub fn piff(&self, path: &str) -> Result<Piff> {
         let dir = self.contain(path)?;
-        let piff = Piff::open(&dir).map_err(|e| e.to_string())?;
+        Piff::open(&dir).map_err(|e| e.to_string())
+    }
+
+    /// Opens the Piff at `path` for editing. Its children section is
+    /// regenerated only if `PIFF.md` already exists; a Piff without one
+    /// starts as an empty document and nothing is written.
+    pub fn open_piff(&self, path: &str) -> Result<PiffView> {
+        let piff = self.piff(path)?;
+        let dir = piff.dir().to_path_buf();
         let warning = piff
             .sync(SyncMode::ExistingOnly)
             .err()
             .map(|e| format!("Could not update the children section: {e}"));
-        let content = piff.render().map_err(|e| e.to_string())?;
         Ok(PiffView {
             path: display(&dir),
             name: piff_name(&dir),
-            has_content: piff.has_content(),
-            html: render::piff(&content),
+            doc: edit::read(&piff)?,
             breadcrumb: self.breadcrumb(&dir),
             warning,
         })
@@ -264,8 +269,7 @@ impl From<Child> for Entry {
 pub struct PiffView {
     pub path: String,
     pub name: String,
-    pub has_content: bool,
-    pub html: String,
+    pub doc: PiffDoc,
     pub breadcrumb: Vec<Crumb>,
     pub warning: Option<String>,
 }
@@ -387,8 +391,8 @@ mod tests {
     fn opening_a_piff_without_content_writes_nothing() {
         let (_tmp, root) = tree();
         let view = root.open_piff(&p(&root, "Meeting Notes")).unwrap();
-        assert!(!view.has_content);
-        assert!(view.html.contains("retro.md"), "{}", view.html);
+        assert!(!view.doc.exists);
+        assert!(view.doc.children_html.contains("retro.md"));
         assert!(!root.path().join("Meeting Notes/PIFF.md").exists());
         assert!(!root.path().join("empty/PIFF.md").exists());
     }
@@ -397,11 +401,12 @@ mod tests {
     fn opening_a_piff_with_content_regenerates_its_section() {
         let (_tmp, root) = tree();
         let view = root.open_piff(&display(root.path())).unwrap();
-        assert!(view.has_content);
+        assert!(view.doc.exists);
         let on_disk = fs::read_to_string(root.path().join("PIFF.md")).unwrap();
         assert!(on_disk.starts_with("# Root\n"));
         assert!(on_disk.contains("(Meeting%20Notes/PIFF.md)"), "{on_disk}");
-        assert!(view.html.contains("piff-children"));
+        assert_eq!(view.doc.text, on_disk);
+        assert!(view.doc.section.is_some());
     }
 
     #[test]

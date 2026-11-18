@@ -21,8 +21,17 @@
           <button id="back" type="button" title="Back" aria-label="Back" disabled>‹</button>
           <button id="forward" type="button" title="Forward" aria-label="Forward" disabled>›</button>
           <nav id="breadcrumb" aria-label="Breadcrumb"></nav>
+          <span id="save-status" aria-live="polite"></span>
+          <button id="external-editor" type="button" title="Open PIFF.md in your default editor (⇧⌘E)" hidden>
+            Open in editor
+          </button>
         </header>
         <div id="notice" hidden></div>
+        <div id="conflict" role="alert" hidden>
+          <span id="conflict-text"></span>
+          <button id="keep-mine" type="button">Keep my version</button>
+          <button id="use-disk" type="button">Load the file from disk</button>
+        </div>
         <article id="content"></article>
       </main>
     </div>

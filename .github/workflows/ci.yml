@@ -48,6 +48,8 @@ jobs:
       # The desktop crate embeds the built frontend, so it must exist first.
       - run: npm run build
         working-directory: apps/desktop
+      - run: npm test
+        working-directory: apps/desktop
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 

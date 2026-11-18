@@ -27,6 +27,7 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 ammonia = "4"
 percent-encoding = "2"
 dunce = "1"
+notify = "8"
 
 [dev-dependencies]
 tempfile = "3"
