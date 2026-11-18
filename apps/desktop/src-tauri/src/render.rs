@@ -7,7 +7,6 @@
 
 use std::sync::LazyLock;
 
-use nodir_core::section;
 use pulldown_cmark::{html, Options, Parser};
 
 static SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
@@ -31,22 +30,6 @@ pub fn markdown(text: &str) -> String {
     let mut out = String::with_capacity(text.len() * 3 / 2);
     html::push_html(&mut out, Parser::new_ext(text, options()));
     SANITIZER.clean(&out).to_string()
-}
-
-/// Renders a Piff's content. The NoDir-owned children section is wrapped in
-/// `<nav class="piff-children">` so it can be styled apart from the user's
-/// own content; everything else renders as ordinary markdown.
-pub fn piff(content: &str) -> String {
-    let split = section::split(content);
-    match split.section {
-        Some(children) => format!(
-            "{}<nav class=\"piff-children\">{}</nav>{}",
-            markdown(split.before),
-            markdown(children),
-            markdown(split.after)
-        ),
-        None => markdown(content),
-    }
 }
 
 #[cfg(test)]
@@ -77,14 +60,5 @@ mod tests {
         let html = markdown("- [x] done\n- [ ] todo");
         assert!(html.contains("checked"));
         assert!(html.contains("disabled"));
-    }
-
-    #[test]
-    fn wraps_children_section() {
-        let content = "# Hi\n\n<!-- nodir:children:start -->\n- [a/](a/PIFF.md)\n<!-- nodir:children:end -->\n";
-        let html = piff(content);
-        assert!(html.starts_with("<h1>Hi</h1>"));
-        assert!(html.contains("<nav class=\"piff-children\">"));
-        assert!(html.contains("href=\"a/PIFF.md\""));
     }
 }

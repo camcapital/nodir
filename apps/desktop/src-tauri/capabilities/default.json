@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window may call NoDir's own commands only. Dialogs and opening files go through those commands, so no plugin API is exposed to the webview.",
+  "description": "The main window may call NoDir's own commands only. Dialogs and opening files go through those commands, so no plugin API is exposed to the webview. Destroying the window is allowed so pending edits can be saved before it closes.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-destroy"]
 }

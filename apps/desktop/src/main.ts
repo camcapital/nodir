@@ -1,4 +1,7 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
 import { api, type Crumb, type Entry, type FileView, type PiffView, type RootInfo } from "./api";
+import { PiffEditor, type EditorHost } from "./editor";
 
 /** An item the main pane can show: a Piff (directory) or a plain file. */
 interface Location {
@@ -17,6 +20,12 @@ const els = {
   breadcrumb: $<HTMLElement>("breadcrumb"),
   notice: $<HTMLDivElement>("notice"),
   content: $<HTMLElement>("content"),
+  externalEditor: $<HTMLButtonElement>("external-editor"),
+  saveStatus: $<HTMLSpanElement>("save-status"),
+  conflict: $<HTMLDivElement>("conflict"),
+  conflictText: $<HTMLSpanElement>("conflict-text"),
+  keepMine: $<HTMLButtonElement>("keep-mine"),
+  useDisk: $<HTMLButtonElement>("use-disk"),
 };
 
 const state = {
@@ -26,11 +35,14 @@ const state = {
   historyIndex: -1,
   expanded: new Set<string>(),
   children: new Map<string, Entry[]>(),
+  /** The editor for the Piff being shown, if the main pane shows a Piff. */
+  editor: null as PiffEditor | null,
 };
 
 // ---------- root ----------
 
-function setRoot(root: RootInfo) {
+async function setRoot(root: RootInfo) {
+  if (!(await leaveEditor())) return;
   state.root = root;
   state.history = [];
   state.historyIndex = -1;
@@ -43,8 +55,10 @@ function setRoot(root: RootInfo) {
 
 async function pickRoot() {
   try {
+    // Save before the backend switches roots under the editor.
+    if (!(await leaveEditor())) return;
     const root = await api.pickRoot();
-    if (root) setRoot(root);
+    if (root) await setRoot(root);
   } catch (err) {
     showNotice(String(err), "error");
   }
@@ -56,6 +70,8 @@ async function pickRoot() {
 let navigationSeq = 0;
 
 async function navigate(loc: Location, push = true) {
+  // Edits are saved before anything else is shown.
+  if (!(await leaveEditor())) return;
   const seq = ++navigationSeq;
   // A slower, older request must not overwrite a newer one.
   const stale = () => seq !== navigationSeq;
@@ -85,7 +101,7 @@ async function navigate(loc: Location, push = true) {
   if (stale()) return;
 
   renderBreadcrumb(view.breadcrumb);
-  if ("hasContent" in view) renderPiff(view);
+  if ("doc" in view) renderPiff(view);
   else renderFile(view);
   renderTree();
   updateHistoryButtons();
@@ -132,6 +148,56 @@ function scrollToAnchor(id: string) {
   el?.scrollIntoView();
 }
 
+// ---------- editor ----------
+
+const editorHost: EditorHost = {
+  followLink: (href) => void followLink(href),
+  showError: (message) => showNotice(message, "error"),
+  showConflict(conflict) {
+    els.conflict.hidden = !conflict;
+    if (conflict) {
+      els.conflictText.textContent = conflict.deleted
+        ? "PIFF.md was deleted on disk while you had unsaved edits."
+        : "PIFF.md was changed on disk while you had unsaved edits.";
+    }
+  },
+  showStatus(status) {
+    els.saveStatus.textContent = { saving: "Saving…", saved: "Saved", unsaved: "Edited", idle: "" }[status];
+    els.saveStatus.dataset.status = status;
+  },
+};
+
+/** Saves the open editor's edits, so the main pane can show something
+ * else. False (and nothing changes) while a conflict waits for the user. */
+async function leaveEditor(): Promise<boolean> {
+  const editor = state.editor;
+  if (!editor) return true;
+  if (editor.hasConflict) {
+    showNotice("Choose which version of PIFF.md to keep first.", "warning");
+    return false;
+  }
+  await editor.flush();
+  return true;
+}
+
+function closeEditor() {
+  state.editor?.destroy();
+  state.editor = null;
+  els.conflict.hidden = true;
+  editorHost.showStatus("idle");
+}
+
+async function openInExternalEditor() {
+  const editor = state.editor;
+  if (!editor) return;
+  try {
+    await editor.flush();
+    await api.openInExternalEditor(editor.path);
+  } catch (err) {
+    showNotice(String(err), "error");
+  }
+}
+
 // ---------- main pane ----------
 
 function renderBreadcrumb(crumbs: Crumb[]) {
@@ -151,18 +217,20 @@ function renderBreadcrumb(crumbs: Crumb[]) {
 }
 
 function renderPiff(view: PiffView) {
+  closeEditor();
   els.content.className = "piff";
-  els.content.innerHTML = view.html; // sanitized by the backend
-  if (!view.hasContent) {
-    els.content.prepend(
-      el("p", "empty-piff", "This Piff has no PIFF.md yet. Its children are listed below."),
-    );
-  }
+  els.content.replaceChildren();
+  state.editor = new PiffEditor(view.path, view.doc, els.content, editorHost);
+  els.externalEditor.hidden = false;
+  void api.watchPiff(view.path).catch((err) => showNotice(String(err), "warning"));
   if (view.warning) showNotice(view.warning, "warning");
   els.content.scrollTo({ top: 0 });
 }
 
 function renderFile(view: FileView) {
+  closeEditor();
+  els.externalEditor.hidden = true;
+  void api.watchPiff(null).catch(() => {});
   const c = view.content;
   els.content.className = "file";
   els.content.replaceChildren();
@@ -314,6 +382,23 @@ function formatSize(bytes: number) {
 els.openFolder.addEventListener("click", pickRoot);
 els.back.addEventListener("click", () => go(-1));
 els.forward.addEventListener("click", () => go(1));
+els.externalEditor.addEventListener("click", () => void openInExternalEditor());
+els.keepMine.addEventListener("click", () => void state.editor?.keepMine());
+els.useDisk.addEventListener("click", () => state.editor?.useDisk());
+
+// PIFF.md of the open Piff changed on disk.
+void api.onPiffChanged((path) => {
+  if (state.editor?.path === path) void state.editor.checkDisk();
+});
+
+// Save pending edits before the window closes.
+void getCurrentWindow().onCloseRequested(async () => {
+  try {
+    await state.editor?.flush();
+  } catch {
+    // Closing must not be blocked by a failed save.
+  }
+});
 
 // Links in rendered content navigate inside the app (or open in the browser
 // for web links); the webview itself never follows them.
@@ -327,9 +412,16 @@ els.content.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && e.key.toLowerCase() === "o") {
+  // In the editor, Alt+arrows move by word and Mod+[ / Mod+] indent.
+  const inEditor = (e.target as Element | null)?.closest?.(".cm-editor") != null;
+  if (mod && e.shiftKey && e.key.toLowerCase() === "e") {
+    e.preventDefault();
+    void openInExternalEditor();
+  } else if (mod && e.key.toLowerCase() === "o") {
     e.preventDefault();
     void pickRoot();
+  } else if (inEditor || e.defaultPrevented) {
+    return;
   } else if ((e.altKey && e.key === "ArrowLeft") || (mod && e.key === "[")) {
     e.preventDefault();
     go(-1);
@@ -349,12 +441,13 @@ renderTree();
 api
   .restoreRoot()
   .then((root) => {
-    if (root) setRoot(root);
+    if (root) void setRoot(root);
     else renderWelcome();
   })
   .catch(() => renderWelcome());
 
 function renderWelcome() {
+  closeEditor();
   els.content.className = "welcome";
   els.content.replaceChildren();
   const button = el("button", "primary", "Open a folder…");

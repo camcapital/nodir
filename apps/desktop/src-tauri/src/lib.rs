@@ -1,4 +1,4 @@
-//! The NoDir desktop app: browse and read Piffs.
+//! The NoDir desktop app: browse, read and edit Piffs.
 //!
 //! The webview only draws. Everything about Piffs goes through `nodir-core`
 //! via the Tauri commands below, and every path the frontend passes in is
@@ -8,19 +8,25 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Manager, State};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 mod browse;
+mod edit;
 mod render;
+mod watch;
 
 use browse::{Entry, FileView, PiffView, Result, Root, RootInfo, Target};
+use edit::{PiffDoc, SaveResult};
 
-/// The root folder currently open, if any.
+/// The root folder currently open, if any, and the watch on the `PIFF.md`
+/// being edited.
 #[derive(Default)]
 struct AppState {
     root: Mutex<Option<Root>>,
+    watch: Mutex<Option<watch::PiffWatch>>,
 }
 
 impl AppState {
@@ -35,6 +41,7 @@ impl AppState {
     fn set_root(&self, app: &AppHandle, root: Root) -> Result<RootInfo> {
         let info = root.info();
         *self.root.lock().map_err(|e| e.to_string())? = Some(root);
+        *self.watch.lock().map_err(|e| e.to_string())? = None;
         // Remembering the root is a convenience; failing to is not an error.
         if let Some(file) = last_root_file(app) {
             if let Some(dir) = file.parent() {
@@ -83,6 +90,57 @@ fn open_piff(state: State<'_, AppState>, path: String) -> Result<PiffView> {
     state.root()?.open_piff(&path)
 }
 
+/// Reads a Piff's content for the editor without writing anything.
+#[tauri::command]
+fn read_piff(state: State<'_, AppState>, path: String) -> Result<PiffDoc> {
+    edit::read(&state.root()?.piff(&path)?)
+}
+
+/// Saves the editor's text through `nodir-core`'s writer, unless `PIFF.md`
+/// changed on disk since the editor last saw it (`expected`).
+#[tauri::command]
+fn save_piff(
+    state: State<'_, AppState>,
+    path: String,
+    text: String,
+    expected: Option<String>,
+) -> Result<SaveResult> {
+    edit::save(&state.root()?.piff(&path)?, &text, expected.as_deref())
+}
+
+/// The payload of [`watch::EVENT`].
+#[derive(Debug, Clone, Serialize)]
+struct PiffChanged {
+    /// The Piff directory, as the frontend passed it in.
+    path: String,
+}
+
+/// Watches the `PIFF.md` of the Piff at `path` for external changes, in
+/// place of any earlier watch. `None` stops watching.
+#[tauri::command]
+fn watch_piff(app: AppHandle, state: State<'_, AppState>, path: Option<String>) -> Result<()> {
+    let mut current = state.watch.lock().map_err(|e| e.to_string())?;
+    *current = None;
+    if let Some(path) = path {
+        let piff = state.root()?.piff(&path)?;
+        *current = Some(watch::watch(piff.dir(), move || {
+            let _ = app.emit(watch::EVENT, PiffChanged { path: path.clone() });
+        })?);
+    }
+    Ok(())
+}
+
+/// Opens a Piff's `PIFF.md` in the OS default app for markdown, creating
+/// the file first if it does not exist yet.
+#[tauri::command]
+fn open_in_external_editor(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<()> {
+    let piff = state.root()?.piff(&path)?;
+    edit::ensure_content_file(&piff)?;
+    app.opener()
+        .open_path(piff.content_path().to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn open_file(state: State<'_, AppState>, path: String) -> Result<FileView> {
     state.root()?.open_file(&path)
@@ -126,6 +184,10 @@ pub fn run() {
             pick_root,
             list_children,
             open_piff,
+            read_piff,
+            save_piff,
+            watch_piff,
+            open_in_external_editor,
             open_file,
             resolve_link,
             open_with_default_app,
