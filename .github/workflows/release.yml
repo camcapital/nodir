@@ -1,0 +1,240 @@
+name: Release
+
+# Pushing a `v*` tag builds every artifact and publishes a GitHub Release.
+# A tag with a suffix (`v0.1.0-rc.1`) publishes a pre-release, so the whole
+# pipeline can be dry-run without touching "latest".
+#
+# `workflow_dispatch` and pull requests that touch this file build every
+# artifact and keep them as workflow artifacts, without creating a release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Read the version and check it against the tag
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          for f in apps/desktop/src-tauri/tauri.conf.json apps/desktop/package.json; do
+            grep -q "\"version\": \"$version\"" "$f" \
+              || { echo "::error file=$f::version does not match Cargo.toml ($version)"; exit 1; }
+          done
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            # v0.1.0-rc.1 releases the 0.1.0 code as a pre-release.
+            if [[ "${tag_version%%-*}" != "$version" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match version $version"
+              exit 1
+            fi
+          fi
+
+  cli:
+    name: nodir CLI (${{ matrix.name }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            os: macos-latest
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      ASSET: nodir-${{ needs.version.outputs.version }}-${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.name }}
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked -p nodir-cli --target aarch64-apple-darwin
+          cargo build --release --locked -p nodir-cli --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/nodir \
+            target/aarch64-apple-darwin/release/nodir \
+            target/x86_64-apple-darwin/release/nodir
+          # Apple silicon refuses to run a binary without a signature, so
+          # give the universal binary an ad-hoc one.
+          codesign --force --sign - dist/nodir
+          lipo -info dist/nodir
+          dist/nodir --version
+
+      - name: Build (${{ matrix.target }})
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked -p nodir-cli --target ${{ matrix.target }}
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/nodir${{ runner.os == 'Windows' && '.exe' || '' }} dist/
+          dist/nodir --version
+
+      - name: Package
+        shell: bash
+        run: |
+          cp README.md LICENSE dist/
+          mkdir -p out
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            (cd dist && 7z a "../out/$ASSET.zip" nodir.exe README.md LICENSE)
+          else
+            tar -czf "out/$ASSET.tar.gz" -C dist nodir README.md LICENSE
+          fi
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  desktop:
+    name: desktop app (${{ matrix.name }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            os: macos-latest
+            args: --target universal-apple-darwin --bundles dmg
+            bundle_dir: target/universal-apple-darwin/release/bundle
+          # The oldest supported runner, so the .deb and AppImage link
+          # against an older glibc and run on more distributions.
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            args: --bundles appimage,deb
+            bundle_dir: target/release/bundle
+          - name: windows-x86_64
+            os: windows-latest
+            args: --bundles msi,nsis
+            bundle_dir: target/release/bundle
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.name }}
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+        working-directory: apps/desktop
+      - run: npx tauri build --ci ${{ matrix.args }}
+        working-directory: apps/desktop
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p out
+          find "${{ matrix.bundle_dir }}" -maxdepth 2 -type f \
+            \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.msi' -o -name '*-setup.exe' \) \
+            -exec cp {} out/ \;
+          ls -l out
+          test -n "$(ls out)"
+
+      - name: Check the app's signature (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          app="target/universal-apple-darwin/release/bundle/macos/NoDir.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          lipo -info "$app/Contents/MacOS/"*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    if: github.ref_type == 'tag'
+    needs: [version, cli, desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        working-directory: artifacts
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          flags=()
+          [[ "$TAG" == *-* ]] && flags+=(--prerelease)
+          cat > notes.md <<'EOF'
+          Unsigned builds of the NoDir desktop app and the `nodir` CLI.
+
+          | | Desktop app | CLI |
+          |---|---|---|
+          | macOS (Apple silicon and Intel) | `NoDir_*_universal.dmg` | `nodir-*-macos-universal.tar.gz` |
+          | Windows (x64) | `NoDir_*_x64-setup.exe` or `NoDir_*_x64_en-US.msi` | `nodir-*-windows-x86_64.zip` |
+          | Linux (x64) | `NoDir_*_amd64.AppImage` or `NoDir_*_amd64.deb` | `nodir-*-linux-x86_64.tar.gz` |
+          | Linux (arm64) | | `nodir-*-linux-aarch64.tar.gz` |
+
+          The apps are not signed, so macOS and Windows warn on first launch. The [README](https://github.com/camcapital/nodir#install) explains how to open them. `SHA256SUMS.txt` lists every file's checksum.
+          EOF
+          gh release create "$TAG" artifacts/* \
+            --title "NoDir $TAG" \
+            --notes-file notes.md \
+            --verify-tag \
+            "${flags[@]}"
