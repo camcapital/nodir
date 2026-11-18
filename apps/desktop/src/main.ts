@@ -168,16 +168,19 @@ const editorHost: EditorHost = {
 };
 
 /** Saves the open editor's edits, so the main pane can show something
- * else. False (and nothing changes) while a conflict waits for the user. */
+ * else. False (and nothing changes) while edits could not be saved: a
+ * conflict waits for the user, or the save failed. */
 async function leaveEditor(): Promise<boolean> {
   const editor = state.editor;
   if (!editor) return true;
-  if (editor.hasConflict) {
-    showNotice("Choose which version of PIFF.md to keep first.", "warning");
-    return false;
-  }
-  await editor.flush();
-  return true;
+  if (await editor.flush()) return true;
+  showNotice(
+    editor.hasConflict
+      ? "Choose which version of PIFF.md to keep first."
+      : "Your edits could not be saved to PIFF.md, so they are still here. Fix the problem, or copy them elsewhere.",
+    "warning",
+  );
+  return false;
 }
 
 function closeEditor() {
@@ -191,7 +194,8 @@ async function openInExternalEditor() {
   const editor = state.editor;
   if (!editor) return;
   try {
-    await editor.flush();
+    // The external editor must start from the edits made here.
+    if (!(await leaveEditor())) return;
     await api.openInExternalEditor(editor.path);
   } catch (err) {
     showNotice(String(err), "error");
@@ -391,13 +395,26 @@ void api.onPiffChanged((path) => {
   if (state.editor?.path === path) void state.editor.checkDisk();
 });
 
-// Save pending edits before the window closes.
-void getCurrentWindow().onCloseRequested(async () => {
+// Save pending edits before the window closes. If they can't be saved,
+// the first close is refused with a warning; closing again discards them.
+let closeAnyway = false;
+void getCurrentWindow().onCloseRequested(async (event) => {
+  if (closeAnyway || !state.editor) return;
+  let saved = false;
   try {
-    await state.editor?.flush();
+    saved = await state.editor.flush();
   } catch {
-    // Closing must not be blocked by a failed save.
+    // Treated as unsaved.
   }
+  if (saved) return;
+  event.preventDefault();
+  closeAnyway = true;
+  showNotice(
+    state.editor.hasConflict
+      ? "PIFF.md changed on disk and your edits aren't saved. Choose a version, or close again to discard your edits."
+      : "Your edits could not be saved to PIFF.md. Close again to discard them.",
+    "warning",
+  );
 });
 
 // Links in rendered content navigate inside the app (or open in the browser

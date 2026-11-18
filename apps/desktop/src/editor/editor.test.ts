@@ -35,12 +35,24 @@ function write(text: string) {
 
 const saves: string[] = [];
 let gate: Promise<void> | null = null;
+/** Holds reads back; a read returns the disk as it was when it started. */
+let readGate: Promise<void> | null = null;
+/** Makes the next save fail, like a full disk. */
+let failNextSave = false;
 
 vi.mock("../api", () => ({
   api: {
-    readPiff: async () => docOf(disk.text),
+    readPiff: async () => {
+      const snapshot = disk.text;
+      if (readGate) await readGate;
+      return docOf(snapshot);
+    },
     savePiff: async (_path: string, text: string, expected: string | null): Promise<SaveResult> => {
       if (gate) await gate;
+      if (failNextSave) {
+        failNextSave = false;
+        throw new Error("disk full");
+      }
       if (disk.text !== expected) return { kind: "conflict", doc: docOf(disk.text) };
       saves.push(text);
       disk.text = write(text);
@@ -72,6 +84,8 @@ const type = (pos: number, insert: string) =>
 beforeEach(() => {
   saves.length = 0;
   gate = null;
+  readGate = null;
+  failNextSave = false;
   vi.clearAllMocks();
 });
 afterEach(() => editor.destroy());
@@ -184,5 +198,53 @@ describe("PiffEditor", () => {
     editor.view.dispatch({ changes: { from: 13, insert: editor.view.state.lineBreak + "more" } });
     await editor.flush();
     expect(saves[0]).toBe(crlf.replace("# T", "# Title").replace("body", "body\r\nmore"));
+  });
+
+  describe("flush, before leaving a Piff", () => {
+    it("also saves edits that had to be merged with a change on disk", async () => {
+      open(`top\n\nbottom\n\n${SECTION}\n`);
+      type(0, "my ");
+      disk.text = `top\n\nbottom edited\n\n${SECTION}\n`; // watcher not yet heard
+      expect(await editor.flush()).toBe(true);
+      expect(editor.dirty).toBe(false);
+      expect(disk.text).toBe(`my top\n\nbottom edited\n\n${SECTION}\n`);
+    });
+
+    it("reports a conflict instead of claiming success", async () => {
+      open(`line\n\n${SECTION}\n`);
+      type(4, " mine");
+      disk.text = `line theirs\n\n${SECTION}\n`;
+      expect(await editor.flush()).toBe(false);
+      expect(editor.hasConflict).toBe(true);
+      expect(text()).toContain("line mine");
+    });
+
+    it("reports a failed save and keeps the edits", async () => {
+      open(`line\n\n${SECTION}\n`);
+      type(4, " mine");
+      failNextSave = true;
+      expect(await editor.flush()).toBe(false);
+      expect(editor.dirty).toBe(true);
+      expect(host.showError).toHaveBeenCalled();
+      // The next attempt succeeds.
+      expect(await editor.flush()).toBe(true);
+      expect(disk.text).toBe(`line mine\n\n${SECTION}\n`);
+    });
+  });
+
+  it("ignores a disk read that started before a save", async () => {
+    open(`line\n\n${SECTION}\n`);
+    let release!: () => void;
+    readGate = new Promise((r) => (release = r));
+    const checking = editor.checkDisk(); // reads the pre-save text
+    type(4, " saved");
+    await editor.save();
+    expect(disk.text).toBe(`line saved\n\n${SECTION}\n`);
+    readGate = null;
+    release();
+    await checking;
+    expect(text()).toBe(disk.text);
+    expect(editor.dirty).toBe(false);
+    expect(host.showConflict).not.toHaveBeenCalled();
   });
 });

@@ -44,6 +44,11 @@ export class PiffEditor {
   private inflight: { sent: string; after: ChangeSet; done: Promise<void> } | null = null;
   /** A disk check was requested while a save was in flight. */
   private recheck = false;
+  /** Counts saves started, so a disk read that overlapped one is known to
+   * be stale. */
+  private saves = 0;
+  /** Whether the last save failed (an I/O error, not a conflict). */
+  private saveFailed = false;
   /** What is on disk while a conflict waits for the user. */
   private conflict: PiffDoc | null = null;
   private destroyed = false;
@@ -103,11 +108,24 @@ export class PiffEditor {
     this.view.focus();
   }
 
-  /** Saves any pending edits now. Resolves once they are on disk (or the
-   * save failed, which is reported to the host). */
-  async flush() {
-    if (this.inflight) await this.inflight.done;
-    if (this.dirty && !this.conflict) await this.save();
+  /**
+   * Saves pending edits now, including ones a save could only merge with a
+   * change on disk. True once every edit is on disk; false if a save failed
+   * or a conflict is waiting for the user, so the edits exist only in the
+   * editor and must not be thrown away.
+   */
+  async flush(): Promise<boolean> {
+    // Bounded, in case something keeps rewriting the file.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (this.inflight) {
+        await this.inflight.done;
+        continue;
+      }
+      if (!this.dirty || this.conflict || this.destroyed) break;
+      await this.save();
+      if (this.saveFailed) break;
+    }
+    return !this.dirty && !this.conflict;
   }
 
   destroy() {
@@ -132,6 +150,7 @@ export class PiffEditor {
       // Edits made meanwhile are picked up when it finishes.
       return this.inflight.done;
     }
+    this.saves++;
     const sent = this.text();
     const expected = this.baseExists ? this.base : null;
     let finish!: () => void;
@@ -142,6 +161,7 @@ export class PiffEditor {
       const result = await api.savePiff(this.path, sent, expected);
       const { after } = this.inflight;
       this.inflight = null;
+      this.saveFailed = false;
       if (this.destroyed) return;
       if (result.kind === "saved") {
         this.merged(sent, after, result.doc);
@@ -152,6 +172,7 @@ export class PiffEditor {
       }
     } catch (err) {
       this.inflight = null;
+      this.saveFailed = true;
       this.host.showError(`Could not save PIFF.md: ${err}`);
     } finally {
       finish();
@@ -207,18 +228,28 @@ export class PiffEditor {
       this.recheck = true;
       return;
     }
-    let doc: PiffDoc;
-    try {
-      doc = await api.readPiff(this.path);
-    } catch (err) {
-      this.host.showError(String(err));
-      return;
+    // A save can start and finish while the read is pending; then the read
+    // may predate it and would look like an external change undoing it.
+    // Such a read is discarded and the disk read again.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const saves = this.saves;
+      let doc: PiffDoc;
+      try {
+        doc = await api.readPiff(this.path);
+      } catch (err) {
+        this.host.showError(String(err));
+        return;
+      }
+      if (this.destroyed) return;
+      if (this.inflight) {
+        this.recheck = true;
+        return;
+      }
+      if (saves === this.saves) {
+        this.onDisk(doc);
+        return;
+      }
     }
-    if (this.destroyed || this.inflight) {
-      this.recheck = true;
-      return;
-    }
-    this.onDisk(doc);
   }
 
   /** The disk holds `doc`. Merge it in, or ask the user if it clashes with
