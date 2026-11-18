@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { CloseGuard } from "./closeGuard";
 import { api, type Crumb, type Entry, type FileView, type PiffView, type RootInfo } from "./api";
 import { PiffEditor, type EditorHost } from "./editor";
 
@@ -173,7 +174,10 @@ const editorHost: EditorHost = {
 async function leaveEditor(): Promise<boolean> {
   const editor = state.editor;
   if (!editor) return true;
-  if (await editor.flush()) return true;
+  if (await editor.flush()) {
+    closeGuard.saved();
+    return true;
+  }
   showNotice(
     editor.hasConflict
       ? "Choose which version of PIFF.md to keep first."
@@ -395,22 +399,16 @@ void api.onPiffChanged((path) => {
   if (state.editor?.path === path) void state.editor.checkDisk();
 });
 
-// Save pending edits before the window closes. If they can't be saved,
-// the first close is refused with a warning; closing again discards them.
-let closeAnyway = false;
+// Save pending edits before the window closes (see CloseGuard). The Quit
+// menu item on macOS closes windows the same way.
+const closeGuard = new CloseGuard();
 void getCurrentWindow().onCloseRequested(async (event) => {
-  if (closeAnyway || !state.editor) return;
-  let saved = false;
-  try {
-    saved = await state.editor.flush();
-  } catch {
-    // Treated as unsaved.
-  }
-  if (saved) return;
+  // The editor can change while the flush runs; keep the one being saved.
+  const editor = state.editor;
+  if (await closeGuard.mayClose(editor)) return;
   event.preventDefault();
-  closeAnyway = true;
   showNotice(
-    state.editor.hasConflict
+    editor?.hasConflict
       ? "PIFF.md changed on disk and your edits aren't saved. Choose a version, or close again to discard your edits."
       : "Your edits could not be saved to PIFF.md. Close again to discard them.",
     "warning",

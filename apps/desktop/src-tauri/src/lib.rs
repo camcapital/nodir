@@ -15,6 +15,7 @@ use tauri_plugin_opener::OpenerExt;
 
 mod browse;
 mod edit;
+mod menu;
 mod render;
 mod watch;
 
@@ -179,6 +180,18 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_menu(menu::build(app.handle())?)?;
+            #[cfg(not(target_os = "macos"))]
+            let _ = app;
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if event.id() == menu::QUIT {
+                menu::quit(app);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             restore_root,
             pick_root,
