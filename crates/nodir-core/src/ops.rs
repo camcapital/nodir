@@ -90,20 +90,23 @@ pub fn rename(path: &Path, new_name: &str) -> Result<Changed> {
 /// Moves the Piff or file at `path` to the OS trash, from where the user can
 /// restore it. A symlink is trashed, not its target.
 ///
-/// On macOS this uses `NSFileManager`, which needs no extra permissions. The
-/// item can be restored by dragging it out of the Trash, but Finder may not
-/// offer "Put Back" for it.
+/// On macOS this uses `NSFileManager`, which needs no extra permissions
+/// (unlike asking Finder to delete, which prompts for Automation access).
+/// Finder's Put Back restores the item.
 pub fn trash(path: &Path) -> Result<Changed> {
     remove_with(path, move_to_trash)
 }
 
 fn move_to_trash(path: &Path) -> io::Result<()> {
-    let mut ctx = trash::TrashContext::default();
     #[cfg(target_os = "macos")]
-    {
+    let ctx = {
         use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut ctx = trash::TrashContext::default();
         ctx.set_delete_method(DeleteMethod::NsFileManager);
-    }
+        ctx
+    };
+    #[cfg(not(target_os = "macos"))]
+    let ctx = trash::TrashContext::default();
     ctx.delete(path).map_err(io::Error::other)
 }
 
