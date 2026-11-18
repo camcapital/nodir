@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CloseGuard } from "./closeGuard";
 import { api, type Crumb, type Entry, type FileView, type PiffView, type RootInfo } from "./api";
 import { PiffEditor, type EditorHost } from "./editor";
+import { initFileOps, openMenu, type Change, type Item } from "./fileops";
 
 /** An item the main pane can show: a Piff (directory) or a plain file. */
 interface Location {
@@ -32,6 +33,8 @@ const els = {
 const state = {
   root: null as RootInfo | null,
   current: null as Location | null,
+  /** The current item with its name and parent, for file operations. */
+  selected: null as Item | null,
   history: [] as Location[],
   historyIndex: -1,
   expanded: new Set<string>(),
@@ -90,6 +93,13 @@ async function navigate(loc: Location, push = true) {
     state.historyIndex = state.history.length - 1;
   }
   state.current = loc;
+  const crumbs = view.breadcrumb;
+  state.selected = {
+    path: loc.path,
+    isPiff: loc.isPiff,
+    name: crumbs[crumbs.length - 1]?.name ?? view.name,
+    parent: crumbs.length > 1 ? crumbs[crumbs.length - 2].path : null,
+  };
   hideNotice();
 
   // Reveal the item in the tree: expand every Piff above it, and the Piff
@@ -321,12 +331,12 @@ function renderTree() {
   const rootEntry: Entry = { name: state.root.name, path: state.root.path, isPiff: true };
   const list = el("ul", "tree-list");
   list.setAttribute("role", "tree");
-  list.append(treeItem(rootEntry, 0));
+  list.append(treeItem(rootEntry, 0, null));
   els.tree.append(list);
   els.tree.querySelector(".tree-row.selected")?.scrollIntoView({ block: "nearest" });
 }
 
-function treeItem(entry: Entry, depth: number): HTMLLIElement {
+function treeItem(entry: Entry, depth: number, parent: string | null): HTMLLIElement {
   const li = el("li", "tree-item");
   li.setAttribute("role", "treeitem");
   const row = el("div", "tree-row");
@@ -349,16 +359,92 @@ function treeItem(entry: Entry, depth: number): HTMLLIElement {
     el("span", "label", entry.name),
   );
   row.addEventListener("click", () => navigate({ path: entry.path, isPiff: entry.isPiff }));
+  row.addEventListener("contextmenu", (e) => openMenu(e, { ...entry, parent }));
   li.append(row);
 
   if (expanded) {
     const kids = state.children.get(entry.path) ?? [];
     const ul = el("ul", "tree-list");
     ul.setAttribute("role", "group");
-    for (const child of kids) ul.append(treeItem(child, depth + 1));
+    for (const child of kids) ul.append(treeItem(child, depth + 1, entry.path));
     li.append(ul);
   }
   return li;
+}
+
+// ---------- file operations ----------
+
+/** Whether `path` is `base` or inside it. Paths use the OS separator. */
+function isUnder(path: string, base: string) {
+  return path === base || path.startsWith(base + "/") || path.startsWith(base + "\\");
+}
+
+/** `path` with its `from` prefix replaced by `to`. */
+function rebase(path: string, from: string, to: string) {
+  return isUnder(path, from) ? to + path.slice(from.length) : path;
+}
+
+function changedPath(change: Change) {
+  return change.kind === "renamed" ? change.from : change.path;
+}
+
+/** Saves the editor before the Piff it edits, or one above it, is renamed
+ * or trashed. */
+async function beforeMove(path: string) {
+  if (!state.editor || !isUnder(state.editor.path, path)) return true;
+  return leaveEditor();
+}
+
+/** Brings the tree, history and main pane up to date after a change on
+ * disk. The backend has already regenerated the parent's children section. */
+async function applied(change: Change) {
+  // The parent's listing changed, and a renamed or trashed Piff's subtree
+  // moved; refetch everything that is expanded.
+  state.children.clear();
+  // The editor's edits were saved by `beforeMove`; close it so nothing is
+  // saved to the old path while navigating away.
+  if (change.kind !== "created" && state.editor && isUnder(state.editor.path, changedPath(change))) {
+    closeEditor();
+  }
+  let next = state.current;
+  switch (change.kind) {
+    case "created":
+      if (change.isPiff) state.expanded.add(change.done.parent);
+      next = { path: change.path, isPiff: change.isPiff };
+      break;
+    case "renamed": {
+      const { from, to } = change;
+      state.expanded = new Set([...state.expanded].map((p) => rebase(p, from, to)));
+      state.history = state.history.map((l) => ({ ...l, path: rebase(l.path, from, to) }));
+      if (next) next = { ...next, path: rebase(next.path, from, to) };
+      break;
+    }
+    case "trashed": {
+      const gone = (p: string) => isUnder(p, change.path);
+      state.expanded = new Set([...state.expanded].filter((p) => !gone(p)));
+      // Drop history entries that no longer exist, keeping the index on the
+      // same entry where possible.
+      const before = state.history.slice(0, state.historyIndex + 1).filter((l) => !gone(l.path));
+      state.history = state.history.filter((l) => !gone(l.path));
+      state.historyIndex = Math.max(0, before.length - 1);
+      if (next && gone(next.path)) {
+        next = { path: change.done.parent, isPiff: true };
+      }
+      break;
+    }
+  }
+  // A new item, or the parent of a trashed one, is a new place to be;
+  // renaming keeps you where you were.
+  const push =
+    change.kind === "created" ||
+    (change.kind === "trashed" && next?.path !== state.current?.path);
+  if (next) {
+    await navigate(next, push);
+  } else {
+    await loadExpanded();
+    renderTree();
+  }
+  if (change.done.warning) showNotice(change.done.warning, "warning");
 }
 
 // ---------- helpers ----------
@@ -451,6 +537,8 @@ document.addEventListener("mouseup", (e) => {
   if (e.button === 3) go(-1);
   if (e.button === 4) go(1);
 });
+
+initFileOps({ selected: () => state.selected, beforeMove, applied });
 
 renderTree();
 api

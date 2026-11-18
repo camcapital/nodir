@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use nodir_core::ops::{self, Changed};
 use nodir_core::{Child, ChildKind, Piff, SyncMode, CONTENT_FILE_NAME};
 use percent_encoding::percent_decode_str;
 use serde::Serialize;
@@ -226,6 +227,69 @@ impl Root {
             });
         }
         Err(format!("{href} does not exist"))
+    }
+    /// Creates a Piff named `name` in the Piff at `parent`, with an initial
+    /// `# title` in its `PIFF.md` if `title` is given.
+    pub fn create_piff(&self, parent: &str, name: &str, title: Option<&str>) -> Result<Done> {
+        Ok(ops::create_piff(&self.contain(parent)?, name, title)
+            .map_err(|e| e.to_string())?
+            .into())
+    }
+
+    /// Creates an empty file named `name` in the Piff at `parent`.
+    pub fn create_file(&self, parent: &str, name: &str) -> Result<Done> {
+        Ok(ops::create_file(&self.contain(parent)?, name)
+            .map_err(|e| e.to_string())?
+            .into())
+    }
+
+    /// Renames the Piff or file at `path`, in place.
+    pub fn rename(&self, path: &str, new_name: &str) -> Result<Done> {
+        Ok(ops::rename(&self.entry(path)?, new_name)
+            .map_err(|e| e.to_string())?
+            .into())
+    }
+
+    /// Moves the Piff or file at `path` to the OS trash.
+    pub fn trash(&self, path: &str) -> Result<Done> {
+        Ok(ops::trash(&self.entry(path)?)
+            .map_err(|e| e.to_string())?
+            .into())
+    }
+
+    /// `path`, if it is inside the root and not the root itself, which the
+    /// app never renames or deletes.
+    fn entry(&self, path: &str) -> Result<PathBuf> {
+        let path = self.contain(path)?;
+        if path == self.path {
+            return Err("The open folder itself cannot be renamed or deleted".to_string());
+        }
+        Ok(path)
+    }
+}
+
+/// The outcome of a file operation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Done {
+    /// The new or renamed entry, or the trashed entry's old path.
+    pub path: String,
+    /// The Piff the entry is (or was) in.
+    pub parent: String,
+    /// Set when the parent's children section could not be updated.
+    pub warning: Option<String>,
+}
+
+impl From<Changed> for Done {
+    fn from(done: Changed) -> Self {
+        Self {
+            path: display(&done.path),
+            parent: display(&done.parent),
+            warning: done
+                .parent_sync
+                .err()
+                .map(|e| format!("Could not update the children section: {e}")),
+        }
     }
 }
 
@@ -500,6 +564,32 @@ mod tests {
                 ("notes.txt".to_string(), false),
             ]
         );
+    }
+
+    #[test]
+    fn file_operations_stay_inside_the_root() {
+        let (_tmp, root) = tree();
+        let top = display(root.path());
+        let done = root.create_piff(&top, "plans", Some("Plans")).unwrap();
+        assert_eq!(done.path, p(&root, "plans"));
+        assert_eq!(done.parent, top);
+        assert!(done.warning.is_none());
+        let on_disk = fs::read_to_string(root.path().join("PIFF.md")).unwrap();
+        assert!(on_disk.contains("(plans/PIFF.md)"), "{on_disk}");
+
+        root.create_file(&p(&root, "plans"), "a.md").unwrap();
+        let renamed = root.rename(&p(&root, "plans"), "Plans 2027").unwrap();
+        assert_eq!(renamed.path, p(&root, "Plans 2027"));
+        let on_disk = fs::read_to_string(root.path().join("PIFF.md")).unwrap();
+        assert!(on_disk.contains("(Plans%202027/PIFF.md)"), "{on_disk}");
+        assert!(!on_disk.contains("(plans/PIFF.md)"), "{on_disk}");
+
+        // Nothing outside the root, and never the root itself.
+        assert!(root.create_file(&p(&root, ".."), "x").is_err());
+        assert!(root.create_file(&top, "../x").is_err());
+        assert!(root.rename(&top, "x").is_err());
+        assert!(root.trash(&top).is_err());
+        assert!(root.trash(&p(&root, "empty/../..")).is_err());
     }
 
     #[test]
